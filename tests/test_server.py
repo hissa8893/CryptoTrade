@@ -38,5 +38,5 @@ def test_non_local_clients_are_refused(home):
     cfg = load_config(home)
     application = create_app(cfg, home, Runtime(cfg, home), start_scheduler=False)
     with TestClient(application, client=("192.168.1.50", 50000)) as client:
-        assert client.get("/health").status_code == 403
-        assert client.post("/api/shutdown").status_code == 403
+        assert client.get("/health").status_code == 401  # other devices must sign in (Phase 5)
+        assert client.post("/api/shutdown").status_code == 403  # and can never shut it down

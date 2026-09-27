@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Research · Paper trader{% endblock %}
+{% block body %}
+<div class="wrap">
+  <nav class="bar"><a class="iconbtn" href="/">← Dashboard</a><span class="spacer"></span><button class="iconbtn" type="button" data-theme-toggle>Theme</button></nav>
+  <h2>Research &amp; backtest reports</h2>
+  <p class="muted" style="font-size:14px">Walk-forward tables, sensitivity heatmaps and Monte Carlo charts live in these reports (newest first). Create more with <code>.venv/bin/trader research</code> or <code>.venv/bin/trader backtest</code>.</p>
+  {% if reports %}
+  <div class="rlist">
+    {% for r in reports %}
+    <a href="/reports/{{ r.name }}"><span>{{ r.kind }} — {{ r.title }}{% if r.synthetic %}<span class="tag bad">SYNTHETIC</span>{% endif %}{% if r.zero_cost %}<span class="tag bad">ZERO-COST</span>{% endif %}</span>
+      <span class="meta">{{ r.modified[:16].replace('T', ' ') }} · {{ r.size_kb }} KB</span></a>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="empty">No reports yet. Run <code>.venv/bin/trader research</code> (about 2 minutes) or <code>.venv/bin/trader backtest -s S1 -a BTC</code>.</div>
+  {% endif %}
+  <footer>SIMULATION ONLY. Backtest results do not predict future returns.</footer>
+</div>
+{% endblock %}

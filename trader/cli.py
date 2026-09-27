@@ -452,6 +452,18 @@ def logs(lines: int = typer.Option(40, "--lines", "-n"), follow: bool = typer.Op
     raise typer.Exit(control.logs(ctx.paths, lines=lines, follow=follow))
 
 
+@app.command("check-heartbeat")
+def check_heartbeat() -> None:
+    """For cron/launchd: send an urgent alert if the trader is not running or its heartbeat is stale."""
+    from trader.control import running_pid
+    from trader.runtime import Runtime
+
+    ctx = _ctx()
+    ok, msg = Runtime(ctx.cfg, ctx.paths).check_heartbeat(running=running_pid(ctx.paths) is not None)
+    typer.echo(("✅ " if ok else "❌ ") + msg)
+    raise typer.Exit(0 if ok else 1)
+
+
 @app.command("run-once")
 def run_once(force: bool = typer.Option(False, "--force", help="Run even though the background trader is running.")) -> None:
     """Process every closed day that has not been processed yet, now, in the foreground."""

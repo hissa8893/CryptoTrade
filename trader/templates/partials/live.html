@@ -1,0 +1,156 @@
+{# ---------------------------------------------------------------- 1. sticky status bar #}
+<header class="status" role="banner">
+  <div class="wrap">
+    <span class="health" data-level="{{ st.level }}">
+      <span class="dot {{ st.level }}" aria-hidden="true">{{ {'ok': '✓', 'warn': '!', 'bad': '✕'}[st.level] }}</span>
+      {{ {'ok': 'Healthy', 'warn': 'Needs attention', 'bad': 'Problem'}[st.level] }}
+    </span>
+    <span class="item" data-testid="last-run">
+      {% if st.last_ok_day %}last run: {{ st.last_ok_at|ago }} {{ '✓' if st.level != 'bad' else '✕' }} <span class="muted">(day {{ st.last_ok_day|day }})</span>
+      {% else %}last run: none yet{% endif %}{% if st.busy %} · <b>processing now</b>{% endif %}
+    </span>
+    <span class="item" data-next-run="{{ st.next_run or '' }}">next run: {{ 'not scheduled' if not st.next_run else st.next_run }}</span>
+    <span class="item {{ 'neg-t' if st.data.level != 'ok' else '' }}">data: {{ st.data.text }} {{ '✓' if st.data.level == 'ok' else '!' }}</span>
+    <span class="upd" data-updated="{{ st.now }}">updated just now</span>
+    <span class="item risk {{ st.risk.level }}" data-testid="risk-state">Risk engine: {{ st.risk.text }}</span>
+    {% if st.note %}<span class="note">⚠ {{ st.note }}</span>{% endif %}
+  </div>
+</header>
+
+<div class="wrap">
+  {% if st.synthetic %}<div class="banner">SYNTHETIC DATA — prices are generated for testing, not real markets.</div>{% endif %}
+
+  <nav class="bar" aria-label="Account and pages">
+    <div class="seg" role="group" aria-label="Account">
+      {% for a in accounts %}<a href="/?acct={{ a.name }}&amp;range={{ rng }}" aria-current="{{ 'true' if acct and a.name == acct.name else 'false' }}">{{ 'Portfolio' if a.name == 'PORTFOLIO' else a.name }}</a>{% endfor %}
+    </div>
+    <span class="spacer"></span>
+    <a class="iconbtn" href="/research">Research →</a>
+    <button class="iconbtn" type="button" data-theme-toggle>Theme</button>
+  </nav>
+
+{% if not acct %}
+  <div class="empty" style="margin-top:16px">No paper account yet. The first daily run creates them — it runs right after start-up and every day at 00:10 UTC.</div>
+{% else %}
+  {# ---------------------------------------------------------------- 2. headline numbers #}
+  <section aria-label="Headline numbers">
+  {% if head %}
+  <div class="tiles">
+    <div class="tile hero"><div class="k">{{ acct.label }} · equity</div><div class="v num" data-testid="equity" data-value="{{ head.equity }}">{{ head.equity|money }}</div><div class="b">as of the close of {{ head.day|day }} (UTC)</div></div>
+    <div class="tile"><div class="k">Today's P&amp;L</div><div class="v {{ head.day_pnl|cls }}" data-testid="day-pnl" data-value="{{ head.day_pnl }}">{{ head.day_pnl|arrow }} {{ head.day_pnl|smoney }}</div><div class="b">{{ head.day_pnl_pct|spct }}</div></div>
+    <div class="tile"><div class="k">Total return</div><div class="v {{ head.total_return|cls }}" data-testid="total-return" data-value="{{ head.total_return }}">{{ head.total_return|arrow }} {{ head.total_return|spct }}</div><div class="b">from {{ head.starting_equity|money0 }}</div></div>
+    <div class="tile"><div class="k">Drawdown from peak</div><div class="v {{ 'neg-t' if head.drawdown > 0.0001 else '' }}" data-testid="drawdown" data-value="{{ head.drawdown }}">{{ '−' if head.drawdown > 0.0001 else '' }}{{ head.drawdown|pct }}</div><div class="b">peak {{ head.peak|money0 }}</div></div>
+    <div class="tile"><div class="k">Open positions</div><div class="v" data-testid="positions" data-value="{{ head.positions }}">{{ head.positions }}</div><div class="b">max {{ max_positions }}</div></div>
+    <div class="tile"><div class="k">Open risk</div><div class="v" data-testid="open-risk" data-value="{{ head.open_risk_pct }}">{{ head.open_risk_pct|pct }}</div><div class="b">limit {{ heat_limit|pct }}</div></div>
+  </div>
+  {% else %}<div class="empty" style="margin-top:16px">No results yet for {{ acct.label }}.</div>{% endif %}
+  </section>
+
+  {# ---------------------------------------------------------------- 3. equity vs buy & hold #}
+  <section aria-label="Equity curve">
+    <h2>Equity vs Buy &amp; Hold</h2>
+    <div class="bar" style="margin-top:0;margin-bottom:8px">
+      <div class="seg" role="group" aria-label="Time range">
+        {% for r, lab in [('7d','7D'),('30d','30D'),('90d','90D'),('all','ALL')] %}<a href="/?acct={{ acct.name }}&amp;range={{ r }}" aria-current="{{ 'true' if r == rng else 'false' }}">{{ lab }}</a>{% endfor %}
+      </div>
+    </div>
+    {% if chart %}<div class="card">{{ chart|safe }}<div class="ddwrap">{{ ddchart|safe }}</div></div>
+    {% else %}<div class="empty">No equity history yet — the curve appears after the first daily run.</div>{% endif %}
+  </section>
+
+  {# ---------------------------------------------------------------- 4. open positions #}
+  <section aria-label="Open positions">
+    <h2>Open positions ({{ positions|length }})</h2>
+    {% if positions %}
+    <div class="plist">
+      {% for p in positions %}
+      <div class="pcard {{ 'near' if p.near_stop else '' }}" data-key="{{ p.key }}" data-sig="{{ p.sig }}">
+        <div class="top"><span><span class="sym">{{ p.symbol }}</span> <span class="strat">{{ p.strategy }}</span></span>
+          <span class="num {{ p.unrealized|cls }}">{{ p.unrealized|arrow }} {{ p.unrealized|smoney }} <span class="muted">({{ p.unrealized_pct|spct }})</span></span></div>
+        <div class="kv">
+          <div><span>Entry {{ p.entry_date|day }}</span><b>{{ p.entry_px|price }}</b></div>
+          <div><span>Price now</span><b>{{ p.price|price }}</b></div>
+          <div><span>Qty</span><b>{{ '%.6g'|format(p.qty) }}</b></div>
+          <div><span>Stop{{ ' (raised)' if p.stop_moved else '' }}</span><b>{{ p.stop|price }}</b></div>
+          <div><span>Distance to stop</span><b>{{ p.dist_to_stop|pct }}</b></div>
+          <div><span>Initial stop</span><b>{{ p.initial_stop|price }}</b></div>
+        </div>
+        {% if p.near_stop %}<div class="warnline">⚠ Within {{ near_stop|pct0 }} of its stop</div>{% endif %}
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty">No open positions — all cash.{% if st.last_ok_at %} Last check {{ st.last_ok_at|ago }}.{% endif %}</div>
+    {% endif %}
+  </section>
+
+  {# ---------------------------------------------------------------- 5. recent closed trades #}
+  <section aria-label="Recent closed trades">
+    <h2>Recent closed trades</h2>
+    {% if trades %}
+    <div class="tlist">
+      {% for t in trades %}
+      <details data-trade="{{ t.id }}" data-key="trade:{{ t.id }}" data-sig="1">
+        <summary>
+          <span><span class="l1">{{ t.symbol }} · {{ t.strategy }}</span>
+            <span class="l2">{{ t.entry_date|day }} → {{ t.exit_date|day }} · {{ t.days }} d · {{ t.exit_icon }} {{ t.exit_label }}</span></span>
+          <span class="pnl {{ t.pnl|cls }}">{{ t.pnl|arrow }} {{ t.pnl|smoney }}<br><span class="l2">{{ '%+.2f'|format(t.r) if t.r is not none else '—' }} R · {{ t.pnl_pct|spct }}</span></span>
+        </summary>
+        <ol class="trail">
+          {% for s in t.trail %}<li><span class="t">{{ s.title }}</span>{% if s.detail %} — <span class="d">{{ s.detail }}</span>{% endif %}</li>{% endfor %}
+          <li><span class="t">Result</span> — <span class="d">entry {{ t.entry_px|price }}, exit {{ t.exit_px|price }}, fees {{ t.fees|money }}, P&amp;L {{ t.pnl|smoney }} ({{ '%+.2f'|format(t.r) if t.r is not none else '—' }} R)</span></li>
+        </ol>
+      </details>
+      {% endfor %}
+    </div>
+    {% else %}<div class="empty">No closed trades yet for {{ acct.label }}.</div>{% endif %}
+  </section>
+{% endif %}
+
+  {# ---------------------------------------------------------------- 6. risk events #}
+  <section aria-label="Risk events">
+    <h2>Risk events <span class="muted" style="text-transform:none;letter-spacing:0">(latest {{ events|length }})</span></h2>
+    {% if events %}
+    <ul class="elist">
+      {% for e in events %}
+      <li data-key="ev:{{ e.id }}" data-sig="1"><span class="badge {{ e.severity }}">{{ {'urgent': '✕ URGENT', 'warn': '! WARN', 'info': 'i INFO'}[e.severity] }}</span>
+        <span><span class="when">{{ e.day|day }}{% if e.symbol %} · {{ e.symbol }}{% endif %}{% if e.strategy %} · {{ e.strategy }}{% endif %}</span><br>{{ e.message }}</span></li>
+      {% endfor %}
+    </ul>
+    {% else %}<div class="empty">No risk events yet — nothing has been blocked, shrunk or flagged.</div>{% endif %}
+  </section>
+
+  {# ---------------------------------------------------------------- 7. strategy scoreboard #}
+  <section aria-label="Strategy scoreboard">
+    <h2>Strategy scoreboard (paper, since start)</h2>
+    {% if board %}
+    <div class="card tscroll"><table>
+      <tr><th>Account</th><th>Return</th><th>Max DD</th><th>Sharpe</th><th>Win rate</th><th>Trades</th></tr>
+      {% for b in board %}
+      <tr class="{{ 'me' if acct and b.name == acct.name else '' }}"><td>{{ b.label }}</td>
+        <td class="n {{ b.return|cls }}">{{ b.return|arrow }} {{ b.return|spct }}</td>
+        <td class="n">{{ '−' if b.max_dd > 0.0001 else '' }}{{ b.max_dd|pct }}</td>
+        <td class="n">{{ '%.2f'|format(b.sharpe) if b.sharpe is not none else '—' }}</td>
+        <td class="n">{{ b.win_rate|pct0 if b.win_rate is not none else '—' }}</td>
+        <td class="n">{{ b.trades }}</td></tr>
+      {% endfor %}
+    </table>
+    <div class="muted" style="font-size:12px;margin-top:6px">Sharpe is shown after 20 days. Each strategy is its own $10,000 sub-account; Portfolio runs all three in one account.</div></div>
+    {% else %}<div class="empty">The scoreboard fills in after the first daily run.</div>{% endif %}
+  </section>
+
+  <section aria-label="Alerts">
+    <h2>Alerts</h2>
+    <div class="card" style="font-size:14px">
+      {% set c = alerts.counts %}
+      Channel: <b>{{ alerts.channel }}</b> ·
+      {{ c.get('sent', 0) }} sent · {{ c.get('skipped', 0) }} not sent · {{ c.get('failed', 0) }} failed{% if c.get('pending') %} · {{ c.pending }} pending{% endif %}
+      {% if c.get('skipped') and alerts.recent and 'not configured' in (alerts.recent[0].error or '') %}
+      <div class="neg-t" style="margin-top:4px">! Email is not set up yet: fill SMTP_* and ALERT_EMAIL_* in .env, then restart.</div>{% endif %}
+      {% if alerts.recent %}<ul class="elist" style="margin-top:6px">{% for a in alerts.recent %}
+        <li><span class="badge {{ a.severity }}">{{ a.status }}</span><span><span class="when">{{ a.at|ago }}</span><br>{{ a.subject }}</span></li>{% endfor %}</ul>{% endif %}
+    </div>
+  </section>
+
+  <footer>SIMULATION ONLY — paper trading; no real orders are ever placed. Backtest and paper results do not predict future returns. · <a href="/research">Research reports</a></footer>
+</div>

@@ -28,19 +28,20 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from trader import __version__
 from trader.config import AppConfig, assert_paper_mode
 from trader.paths import Paths
+from trader.dashboard import Dashboard
 from trader.runtime import Runtime
 from trader.timeutil import iso, now_iso
+from trader.web import DASH_CSP, register_dashboard, session_ok
 
 log = logging.getLogger(__name__)
 
 SECURITY_HEADERS = {
-    "Content-Security-Policy": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
-                               "script-src 'self' 'unsafe-inline'; frame-ancestors 'none'",
+    "Content-Security-Policy": DASH_CSP,
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "no-referrer",
     "X-Content-Type-Options": "nosniff",
@@ -78,6 +79,7 @@ def create_app(cfg: AppConfig, paths: Paths, runtime: Runtime, *, start_schedule
         app.state.started = time.time()
         app.state.started_iso = now_iso()
         write_pid_file(paths)
+        runtime.startup_check()
         sched = BackgroundScheduler(timezone=timezone.utc, job_defaults={
             "coalesce": True, "max_instances": 1, "misfire_grace_time": cfg.scheduler.misfire_grace_seconds})
         if start_scheduler:
@@ -106,9 +108,16 @@ def create_app(cfg: AppConfig, paths: Paths, runtime: Runtime, *, start_schedule
 
     @app.middleware("http")
     async def guard(request: Request, call_next):
-        # Phase 5 adds the token login for other devices; until then only this computer may connect.
+        # This computer gets in directly. Other devices need a signed-in session (token login);
+        # the shutdown endpoint is never reachable from another device.
+        path = request.url.path
         if not _is_loopback(request.client.host if request.client else None):
-            return JSONResponse({"error": "forbidden"}, status_code=403, headers=SECURITY_HEADERS)
+            if path == "/api/shutdown":
+                return JSONResponse({"error": "local only"}, status_code=403, headers=SECURITY_HEADERS)
+            if not (path == "/login" or path.startswith("/static/") or session_ok(app, request)):
+                if request.method == "GET" and (path in ("/", "/research") or path.startswith("/reports/")):
+                    return RedirectResponse("/login", status_code=303, headers=SECURITY_HEADERS)
+                return JSONResponse({"error": "sign in required"}, status_code=401, headers=SECURITY_HEADERS)
         resp = await call_next(request)
         for k, v in SECURITY_HEADERS.items():
             resp.headers.setdefault(k, v)
@@ -149,13 +158,7 @@ def create_app(cfg: AppConfig, paths: Paths, runtime: Runtime, *, start_schedule
             server.should_exit = True
         return {"ok": True}
 
-    @app.get("/", response_class=HTMLResponse)
-    def index():
-        h = health()
-        return (f"<!doctype html><meta charset=utf-8><title>trader</title><body style='font-family:system-ui;padding:16px'>"
-                f"<h1>Paper trader is running</h1><p>SIMULATION ONLY. The full dashboard arrives in Phase 5.</p>"
-                f"<pre>{h}</pre></body>")
-
+    register_dashboard(app, Dashboard(cfg, paths, runtime.db, runtime.md, runtime, next_run=_next_run))
     return app
 
 

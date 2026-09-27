@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Sign in · Paper trader{% endblock %}
+{% block body %}
+<div class="wrap">
+  <h2>Paper trader — sign in</h2>
+  <p class="muted" style="font-size:14px">You are connecting from another device, so the dashboard login token is required (it was printed once by the installer).</p>
+  <form class="login" method="post" action="/login">
+    <label for="token">Login token</label>
+    <input id="token" name="token" type="password" autocomplete="current-password" required>
+    <button type="submit">Sign in</button>
+    {% if error %}<div class="neg-t">✕ {{ error }}</div>{% endif %}
+  </form>
+</div>
+{% endblock %}

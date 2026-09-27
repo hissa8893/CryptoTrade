@@ -26,7 +26,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import text
@@ -177,6 +177,44 @@ class Runtime:
 
     def heartbeat(self) -> None:
         self.db.set_kv("heartbeat", now_iso())
+
+    def startup_check(self) -> float | None:
+        """Called when the daemon starts: if the last heartbeat is older than the stale limit, the
+        trader was down (computer off, crash) -> urgent alert + event. Returns the downtime in hours."""
+        hb = self.db.get_kv("heartbeat")
+        if not hb:
+            return None
+        hours = (now_utc() - datetime.fromisoformat(hb)).total_seconds() / 3600
+        if hours <= self.cfg.scheduler.heartbeat_stale_hours:
+            return hours
+        msg = (f"No heartbeat for {hours:.0f} h (last seen {hb[:16].replace('T', ' ')} UTC): the trader was not "
+               "running. It has restarted and is catching up every missed day in order.")
+        with self.db.tx() as c:
+            c.execute(text(
+                "INSERT INTO risk_events (run_id, ts, bar_date, type, severity, message, details_json, dedupe_key) "
+                "VALUES (NULL, :ts, NULL, 'heartbeat_missing', 'urgent', :m, :det, :k) ON CONFLICT (dedupe_key) DO NOTHING"),
+                {"ts": now_iso(), "m": msg, "det": json.dumps({"last_heartbeat": hb, "hours": hours}), "k": f"downtime:{hb}"})
+            queue_alert(c, "urgent", f"[trader] no heartbeat for {hours:.0f} h", msg, f"downtime:{hb}")
+        log.warning("trader was down for %.0f h (last heartbeat %s)", hours, hb)
+        return hours
+
+    def check_heartbeat(self, running: bool) -> tuple[bool, str]:
+        """For an external scheduler (cron/launchd), independent of the daemon: alert if the daemon
+        is not running or its heartbeat is stale. Returns (healthy, message)."""
+        hb = self.db.get_kv("heartbeat")
+        hours = (now_utc() - datetime.fromisoformat(hb)).total_seconds() / 3600 if hb else None
+        limit = self.cfg.scheduler.heartbeat_stale_hours
+        if running and hours is not None and hours <= limit:
+            return True, f"ok: heartbeat {hours * 60:.0f} min ago"
+        why = "not running" if not running else ("never started" if hours is None else f"no heartbeat for {hours:.0f} h")
+        if hours is None or hours > limit or not running:
+            day = now_utc().date().isoformat()
+            with self.db.tx() as c:
+                queue_alert(c, "urgent", f"[trader] trader is {why}",
+                            f"The paper trader is {why} (checked {now_iso()} UTC). Start it with ./start.sh.",
+                            f"watch:{day}:{why.split(' ')[0]}")
+            dispatch_pending(self.cfg, self.secrets, self.db)
+        return False, why
 
     # -- entry points -------------------------------------------------------------------------
     def catch_up_if_due(self) -> list[DayResult]:

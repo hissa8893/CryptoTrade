@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block title %}{% if head %}{{ head.equity|money }} · {% endif %}Paper trader{% endblock %}
+{% block body %}
+<div id="live" hx-get="/p/live?acct={{ acct.name if acct else '' }}&amp;range={{ rng }}" hx-trigger="every 60s" hx-swap="innerHTML">
+{% include "partials/live.html" %}
+</div>
+{% endblock %}

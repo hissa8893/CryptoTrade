@@ -17,7 +17,7 @@ Built in phases; each phase ends with a validation report.
 | 2 | SimBroker, RiskManager, S1, BTC backtest + look-ahead proof | ✅ done |
 | 3 | S2, S3, benchmarks, walk-forward, sensitivity, Monte Carlo | ✅ done |
 | 4 | `trader serve`, daily job, catch-up, crash recovery, start/stop scripts | ✅ done |
-| 5 | Dashboard + email alerts | pending |
+| 5 | Dashboard + email alerts | ✅ done |
 | 6 | Hardening, clean-install test, service install, full README | pending |
 | 7 | Optional LLM analyst layer | pending |
 
@@ -84,6 +84,61 @@ What happens while it runs:
 within 30 seconds it is force-killed, and `stop` tells you so. `run-once` processes pending days in
 the foreground without the background server (it refuses if the trader is already running).
 The Windows `.bat` files are generated but **untested**.
+
+## Dashboard (Phase 5)
+
+Open **http://127.0.0.1:8765** while the trader is running (`start` opens it for you).
+It refreshes itself every 60 seconds.
+
+* **Status bar** (always visible): a health dot (✓ healthy · ! needs attention · ✕ problem;
+  it turns to ✕ if the last successful run is more than 26 hours old), when the last run
+  finished, a countdown to the next one, whether the price data is fresh, and the risk
+  engine's state in plain words (for example "Circuit breaker on — new entries blocked").
+* **Headline numbers:** equity, today's P&L, total return, drawdown from peak, open positions, open risk.
+* **Equity vs Buy & Hold** (7D / 30D / 90D / ALL) with the drawdown underneath. Use the
+  S1 / S2 / S3 / Portfolio buttons to switch account.
+* **Open positions:** entry, price now, unrealized P&L, stop, and distance to the stop.
+  Positions within 3% of their stop are highlighted.
+* **Recent closed trades:** tap one to see its full decision trail
+  (signal → risk check → LLM verdict → fill, for the entry and the exit).
+* **Risk events** in plain English (newest first), a **strategy scoreboard**, and whether
+  **alerts** are being delivered.
+* **Research** (top right) lists every backtest and research report.
+
+Gains are blue with ▲ and "+"; losses are vermillion with ▼ and "−". The colors are
+colorblind-safe and never the only signal. The theme is dark by default; the button switches
+to light, and your OS light/dark setting is respected.
+
+The dashboard is **read-only** and makes **no requests to the internet** (everything is
+served from this computer).
+
+### Viewing it from another device (optional)
+
+By default it only listens on this computer (`server.host: 127.0.0.1`), which is the safest
+setting. To look from your phone later, either:
+
+* **SSH tunnel** (keeps 127.0.0.1): `ssh -L 8765:127.0.0.1:8765 you@your-mac`, then open
+  http://127.0.0.1:8765 on the device, or
+* **Tailscale**: set `server.host` to your Mac's Tailscale IP (100.x.y.z) and restart. Other
+  devices must sign in with the **dashboard login token** that the installer printed once.
+
+Never use `0.0.0.0` (the config refuses it). Only the SHA-256 hash of the token is stored. If
+you lost the token, delete `data/dashboard_token.sha256` and run `.venv/bin/trader init`
+to get a new one.
+
+### Email alerts
+
+Put your SMTP details in `.env` (for Gmail: `SMTP_HOST=smtp.gmail.com`, `SMTP_PORT=587`,
+`SMTP_USER=you@gmail.com`, `SMTP_PASSWORD=<an App Password>`, `ALERT_EMAIL_FROM` and
+`ALERT_EMAIL_TO`), then check it with `.venv/bin/trader doctor --send-test-alert`. You get:
+
+* a one-line **daily summary** (equity, day P&L, open positions) for each account;
+* an **urgent** email right away for: circuit breaker on, daily loss cap hit, a daily run
+  failed or skipped, bad or missing price data, and the trader having been down for more
+  than 26 hours (sent when it starts again).
+
+Each alert is sent once, even if a day is re-run. `.venv/bin/trader check-heartbeat` sends
+an urgent email if the trader is not running; Phase 6 schedules it for you.
 
 ## Backtesting (Phase 2)
 

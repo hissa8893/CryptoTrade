@@ -36,7 +36,14 @@ def test_non_paper_config_blocks_every_command(home):
 
 def test_synthetic_fetch_then_offline_doctor(home):
     runner.invoke(app, ["init"])
-    home.config_file.write_text(home.config_file.read_text().replace("source: exchange", "source: synthetic"))
+    import socket
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()  # a free port: the real trader may be running on 8765 while tests run
+    home.config_file.write_text(home.config_file.read_text().replace("source: exchange", "source: synthetic")
+                                .replace("port: 8765", f"port: {port}"))
     assert runner.invoke(app, ["db", "migrate"]).exit_code == 0
     r = runner.invoke(app, ["data", "fetch"])
     assert r.exit_code == 0, r.output

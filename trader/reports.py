@@ -44,7 +44,7 @@ table{border-collapse:collapse;width:100%;font-size:13px}th,td{padding:5px 8px;b
 th:first-child,td:first-child{text-align:left}th{color:var(--text-secondary);font-weight:600}
 td{font-family:var(--mono);font-variant-numeric:tabular-nums}.scroll{overflow-x:auto}
 .pos{color:var(--good-ink)}.neg{color:var(--bad-ink)}
-.legend{display:flex;gap:16px;font-size:13px;color:var(--text-secondary);margin:0 0 6px}.legend i{display:inline-block;width:18px;height:2px;vertical-align:middle;margin-right:6px}
+.legend{display:flex;gap:16px;font-size:13px;color:var(--text-secondary);margin:0 0 6px}.legend i{display:inline-block;width:18px;height:0;border-top:2px solid var(--key);vertical-align:middle;margin-right:6px}.legend i.dash{border-top-style:dashed}
 svg text{font:13px var(--sans);fill:var(--text-muted)}svg .lbl{font-weight:600}
 .chart{position:relative;min-width:700px}.chartwrap{overflow-x:auto}.tip{position:absolute;pointer-events:none;background:var(--surface-1);border:1px solid var(--border);
 border-radius:6px;padding:6px 8px;font-size:12px;display:none;min-width:160px;box-shadow:0 2px 8px rgba(0,0,0,.12)}
@@ -97,78 +97,8 @@ def _cls(x):
     return "" if x is None else ("pos" if x > 0 else "neg" if x < 0 else "")
 
 
-def _nice_step(raw: float) -> float:
-    """Round a raw tick step up to 1, 2, 2.5 or 5 x 10^k."""
-    e = 10 ** math.floor(math.log10(raw))
-    for m in (1, 2, 2.5, 5, 10):
-        if raw <= m * e:
-            return m * e
-    return 10 * e
-
-
-def _nice_log_ticks(lo: float, hi: float) -> list[float]:
-    out = []
-    for e in range(int(math.floor(math.log10(lo))) - 1, int(math.ceil(math.log10(hi))) + 1):
-        for m in (1, 2, 5):
-            v = m * 10**e
-            if lo <= v <= hi:
-                out.append(v)
-    return out
-
-
-def _line_chart(dates: list[str], series: list[dict], *, height: int, log: bool, fmt: str, title: str) -> str:
-    n = len(dates)
-    x0, x1 = PAD_L, W - PAD_R
-    y0, y1 = PAD_T, height - PAD_B
-    allv = np.concatenate([np.asarray(s["values"], float) for s in series])
-    if log:
-        lo, hi = max(allv.min(), 1e-9), allv.max()
-        f = lambda v: math.log10(max(v, 1e-9))
-        a, b = f(lo) - 0.02, f(hi) + 0.02
-        ticks = _nice_log_ticks(lo, hi) or [lo, hi]
-    else:
-        lo, hi = min(allv.min(), 0.0), max(allv.max(), 0.0)
-        f = lambda v: v
-        step = _nice_step((hi - lo) / 4 if hi > lo else 1.0)
-        lo, hi = math.floor(lo / step) * step, math.ceil(hi / step) * step
-        a, b = lo - (hi - lo) * 0.03, hi + (hi - lo) * 0.03 or 1
-        ticks = [lo + k * step for k in range(int(round((hi - lo) / step)) + 1)]
-    ys = lambda v: y1 - (f(v) - a) / (b - a) * (y1 - y0)
-    xs = lambda i: x0 + (x1 - x0) * i / max(1, n - 1)
-    parts = [f'<svg viewBox="0 0 {W} {height}" width="100%" role="img" aria-label="{html.escape(title)}">']
-    for t in ticks:
-        y = ys(t)
-        lab = f"{t * 100:.0f}%" if fmt == "pct" else (f"${t / 1000:,.0f}k" if t >= 1000 else f"${t:,.0f}")
-        parts.append(f'<line x1="{x0}" x2="{x1}" y1="{y:.1f}" y2="{y:.1f}" stroke="var(--grid)"/>'
-                     f'<text x="{x0 - 6}" y="{y + 4:.1f}" text-anchor="end">{lab}</text>')
-    years = sorted({d[:4] for d in dates})
-    for yr in years:
-        i = next(k for k, d in enumerate(dates) if d[:4] == yr)
-        if i == 0 and len(years) > 1 and dates[0][5:] != "01-01":
-            continue
-        parts.append(f'<text x="{xs(i):.1f}" y="{height - 8}" text-anchor="middle">{yr}</text>')
-    for s in series:
-        vals = s["values"]
-        d = "M" + " L".join(f"{xs(i):.1f},{ys(v):.1f}" for i, v in enumerate(vals))
-        parts.append(f'<path d="{d}" fill="none" stroke="{s["color"]}" stroke-width="2" stroke-linejoin="round"/>')
-    # direct labels at the right end (nudged apart if they collide)
-    ends = sorted(((ys(s["values"][-1]), s) for s in series), key=lambda t: t[0])
-    last_y = -1e9
-    for y, s in ends:
-        y = max(y, last_y + 14)
-        last_y = y
-        v = s["values"][-1]
-        val = f"{v * 100:.1f}%" if fmt == "pct" else f"${v:,.0f}"
-        parts.append(f'<text class="lbl" x="{x1 + 6}" y="{y + 4:.1f}" style="fill:var(--text-primary)">{val}</text>'
-                     f'<text x="{x1 + 6}" y="{y + 16:.1f}">{html.escape(s["short"])}</text>')
-    parts.append(f'<line class="hair" x1="0" x2="0" y1="{y0}" y2="{y1}" stroke="var(--text-muted)" style="display:none"/>')
-    parts.append(f'<rect x="{x0}" y="{y0}" width="{x1 - x0}" height="{y1 - y0}" fill="transparent"/></svg>')
-    data = {"dates": dates, "w": W, "x0": x0, "x1": x1, "series": [
-        {"name": s["name"], "color": s["color"], "fmt": fmt, "values": [round(float(v), 6) for v in s["values"]]}
-        for s in series]}
-    legend = "".join(f'<span><i style="background:{s["color"]}"></i>{html.escape(s["name"])}</span>' for s in series)
-    return (f'<div class="legend">{legend}</div><div class="chartwrap"><div class="chart" data-series=\'{html.escape(json.dumps(data))}\'>'
-            + "".join(parts) + '<div class="tip"></div></div></div>')
+from trader.charts import line_chart as _line_chart  # noqa: E402  (shared with the dashboard)
+from trader.charts import nice_step as _nice_step  # noqa: E402,F401
 
 
 METRIC_ROWS = [

@@ -1,0 +1,37 @@
+/* Design tokens: the ONLY colors, typefaces and spacing the dashboard uses.
+   6 colors per theme. Gains/healthy = blue, losses/problems = vermillion: a colorblind-safe
+   pair (validated for protan/deutan/tritan separation), always paired with +/− signs and
+   icons, never color alone. Both pass WCAG 4.5:1 as text and 3:1 as chart marks.
+   Dark is the default; light follows the OS setting or the toggle. */
+:root {
+  --bg: #111110;
+  --surface: #1a1a19;
+  --ink: #f2f1ec;
+  --muted: #a3a199;
+  --pos: #3987e5;
+  --neg: #e0663a;
+
+  --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --font-num: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+
+  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px;
+  --radius: 6px;
+  --tap: 44px;
+
+  /* derived (mixes of the six, not new colors) */
+  --line: color-mix(in oklab, var(--muted) 28%, var(--surface));
+  --wash: color-mix(in oklab, var(--muted) 10%, var(--surface));
+  --pos-wash: color-mix(in oklab, var(--pos) 16%, var(--surface));
+  --neg-wash: color-mix(in oklab, var(--neg) 16%, var(--surface));
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #f4f4f2; --surface: #fcfcfb; --ink: #16161a; --muted: #5f5e59; --pos: #1d5fb0; --neg: #b23f14;
+    color-scheme: light;
+  }
+}
+:root[data-theme="light"] {
+  --bg: #f4f4f2; --surface: #fcfcfb; --ink: #16161a; --muted: #5f5e59; --pos: #1d5fb0; --neg: #b23f14;
+  color-scheme: light;
+}
