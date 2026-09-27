@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trader"
+version = "0.1.0"
+description = "Paper-trading-only daily crypto trading agent. Simulation only - never places real orders."
+requires-python = ">=3.11"
+readme = "README.md"
+
+[project.scripts]
+trader = "trader.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["trader*"]
+
+[tool.setuptools.package-data]
+trader = ["migrations/*.sql", "templates/**/*", "static/**/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-p no:cacheprovider"
+markers = [
+    "network: needs internet access to the configured exchange (skipped when unreachable)",
+    "slow: long-running test",
+]

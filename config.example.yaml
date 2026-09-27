@@ -1,0 +1,85 @@
+# Trader configuration. Copied to config.yaml by the installer (only if config.yaml
+# does not exist). Secrets (SMTP password, optional LLM key) go in .env, NOT here.
+#
+# SIMULATION ONLY: mode must be "paper". Any other value is refused at startup.
+mode: paper
+
+costs:
+  fee_rate: 0.001          # 0.10% per side
+  slippage_major: 0.0005   # 0.05% for major assets (below)
+  slippage_other: 0.0015   # 0.15% for everything else
+  major_assets: [BTC, ETH]
+
+risk:
+  regime_filter_enabled: true   # no new longs while BTC close < BTC SMA(regime_sma)
+  regime_asset: BTC
+  regime_sma: 200
+  initial_stop_atr_mult: 2.5    # initial stop = entry - 2.5 x ATR(atr_period)
+  atr_period: 14
+  risk_per_trade: 0.01          # 1% of equity at risk per trade (allowed 0.1%..2%)
+  max_position_pct: 0.25        # no position larger than 25% of equity
+  max_portfolio_heat: 0.04      # total open risk <= 4% of equity
+  max_positions: 4              # across all strategies
+  daily_loss_cap: 0.03          # equity down >= 3% in a day -> no new entries next day
+  drawdown_breaker: 0.15        # >= 15% below peak -> block new entries...
+  drawdown_release: 0.10        # ...until back within 10% of peak
+  losing_streak_limit: 4        # 4 losses in a row on a strategy ->
+  cooldown_days: 5              # ...pause that strategy's entries for 5 days
+
+strategies:
+  s1:   # Donchian breakout + chandelier trailing stop
+    enabled: true
+    entry_lookback: 20
+    exit_lookback: 10
+    atr_period: 20
+    chandelier_mult: 3.0
+  s2:   # Supertrend with SMA trend filter
+    enabled: true
+    atr_period: 10
+    multiplier: 3.0
+    trend_sma: 200
+  s3:   # Time-series momentum with volatility-scaled sizing
+    enabled: true
+    short_lookback: 30
+    long_lookback: 90
+    trend_sma: 200
+    target_vol: 0.40
+    vol_lookback: 30
+    rebalance_threshold: 0.20
+    annualization: 365
+
+accounts:
+  starting_equity: 10000        # USD per strategy sub-account
+
+data:
+  source: exchange              # "exchange" (real public candles) or "synthetic" (offline testing only)
+  exchange: bitstamp            # US-accessible, USD pairs, long daily history
+  fallback_exchanges: [coinbaseexchange]
+  assets: [BTC, ETH, SOL, XRP]
+  quote_preference: [USD, USDT]
+  timeframe: 1d
+  history_start: "2015-01-01"
+  max_fill_gap_days: 3          # gaps up to N days are filled flat and flagged; longer gaps trim history
+  request_retries: 5
+  retry_base_delay: 2.0
+  request_timeout_seconds: 30
+
+scheduler:
+  run_hour_utc: 0
+  run_minute_utc: 10            # daily job at 00:10 UTC
+  misfire_grace_seconds: 21600
+  heartbeat_stale_hours: 26
+
+server:
+  host: 127.0.0.1               # never 0.0.0.0
+  port: 8765
+
+alerts:
+  channel: email                # none | email | telegram  (credentials in .env)
+  daily_summary: true
+
+llm:
+  enabled: false                # optional analyst layer; can only approve/shrink/veto
+  model: claude-sonnet-5
+  timeout_seconds: 30
+  max_bars: 60
