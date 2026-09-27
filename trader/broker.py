@@ -53,16 +53,20 @@ class Position:
     symbol: str
     strategy: str
     qty: float
-    entry_px: float  # fill price incl. slippage
+    entry_px: float  # average fill price incl. slippage (changes when a rebalance adds)
     entry_date: str
     initial_stop: float
     stop: float
     highest_high: float
-    entry_fee: float
-    entry_slippage: float
+    entry_fee: float  # all buy fees paid so far (entry + adds)
+    entry_slippage: float  # all slippage paid so far (buys + partial sells)
     trade_no: int
     entry_signal_ref: int | None = None
     bars_held: int = 0
+    realized_pnl: float = 0.0  # from partial sells (rebalances), net of their fees
+    sell_fees: float = 0.0  # fees of partial sells (already inside realized_pnl)
+    max_qty: float = 0.0
+    initial_risk_usd: float = 0.0  # qty x (entry - initial stop) at the first fill: the "1R"
 
     @property
     def key(self) -> tuple[str, str]:
@@ -70,7 +74,7 @@ class Position:
 
     @property
     def initial_risk(self) -> float:
-        return self.qty * (self.entry_px - self.initial_stop)
+        return self.initial_risk_usd
 
 
 @dataclass
@@ -174,12 +178,16 @@ class SimBroker:
                     o.status = "cancelled"
                     done.append(o)
                     continue
-                f, t = self._close(pos, date, px_open, o.reason, o.id, o.signal_ref)
+                if o.qty < pos.qty * (1 - 1e-9):  # rebalance trim: partial sell, position stays open
+                    f, t = self._reduce(pos, date, px_open, o.qty, o.reason, o.id), None
+                else:
+                    f, t = self._close(pos, date, px_open, o.reason, o.id, o.signal_ref)
                 o.status, o.fill_date, o.fill_px, o.fee, o.slippage = "filled", date, f.px, f.fee, f.slippage
                 o.filled_qty = f.qty
                 done.append(o)
                 fills.append(f)
-                trades.append(t)
+                if t is not None:
+                    trades.append(t)
             else:
                 f = self._open(o, date, px_open)
                 done.append(o)
@@ -200,17 +208,45 @@ class SimBroker:
             o.status = "cancelled"
             return None
         fee = qty * px * self.costs.fee_rate
+        existing = self.positions.get((o.strategy, o.symbol))
+        if existing is None and o.reason.startswith("rebalance"):
+            o.status = "cancelled"  # the position it was meant to top up is gone; never open without a stop
+            return None
         self.cash -= qty * px + fee
-        stop = px - (o.stop_distance or 0.0)
+        if existing is not None:  # rebalance add: average in, stop unchanged
+            existing.entry_px = (existing.qty * existing.entry_px + qty * px) / (existing.qty + qty)
+            existing.qty += qty
+            existing.max_qty = max(existing.max_qty, existing.qty)
+            existing.entry_fee += fee
+            existing.entry_slippage += qty * (px - px_open)
+            o.status, o.fill_date, o.fill_px, o.fee, o.slippage, o.filled_qty = "filled", date, px, fee, qty * (px - px_open), qty
+            return Fill(date, o.symbol, o.strategy, "buy", qty, px_open, px, fee, qty * (px - px_open), o.reason, o.id, note)
+        if not o.stop_distance or o.stop_distance <= 0 or o.stop_distance >= px:
+            self.cash += qty * px + fee  # undo: a new position must have a valid protective stop
+            o.status = "cancelled"
+            return None
+        stop = px - o.stop_distance
         pos = Position(
             symbol=o.symbol, strategy=o.strategy, qty=qty, entry_px=px, entry_date=date,
             initial_stop=stop, stop=stop, highest_high=px_open, entry_fee=fee,
             entry_slippage=qty * (px - px_open), trade_no=self.next_trade_no, entry_signal_ref=o.signal_ref,
+            max_qty=qty, initial_risk_usd=qty * (px - stop),
         )
         self.next_trade_no += 1
         self.positions[pos.key] = pos
         o.status, o.fill_date, o.fill_px, o.fee, o.slippage, o.filled_qty = "filled", date, px, fee, qty * (px - px_open), qty
         return Fill(date, o.symbol, o.strategy, "buy", qty, px_open, px, fee, qty * (px - px_open), o.reason, o.id, note)
+
+    def _reduce(self, pos: Position, date: str, raw_px: float, qty: float, reason: str, order_id: int | None) -> Fill:
+        slip = self.costs.slippage(pos.symbol)
+        px = raw_px * (1 - slip)
+        fee = qty * px * self.costs.fee_rate
+        self.cash += qty * px - fee
+        pos.realized_pnl += (px - pos.entry_px) * qty - fee
+        pos.sell_fees += fee
+        pos.entry_slippage += qty * (raw_px - px)
+        pos.qty -= qty
+        return Fill(date, pos.symbol, pos.strategy, "sell", qty, raw_px, px, fee, qty * (raw_px - px), reason, order_id)
 
     def _close(self, pos: Position, date: str, raw_px: float, reason: str, order_id: int | None,
                exit_signal_ref: int | None = None) -> tuple[Fill, Trade]:
@@ -220,14 +256,15 @@ class SimBroker:
         slip_cost = pos.qty * (raw_px - px)
         self.cash += pos.qty * px - fee
         del self.positions[pos.key]
-        fees = pos.entry_fee + fee
-        pnl = (px - pos.entry_px) * pos.qty - fees
+        fees = pos.entry_fee + pos.sell_fees + fee
+        pnl = pos.realized_pnl + (px - pos.entry_px) * pos.qty - fee - pos.entry_fee
         risk = pos.initial_risk
+        qty = max(pos.max_qty, pos.qty)
         trade = Trade(
             trade_no=pos.trade_no, symbol=pos.symbol, strategy=pos.strategy, entry_date=pos.entry_date,
-            entry_px=pos.entry_px, qty=pos.qty, initial_stop=pos.initial_stop, exit_date=date, exit_px=px,
+            entry_px=pos.entry_px, qty=qty, initial_stop=pos.initial_stop, exit_date=date, exit_px=px,
             exit_reason=reason, fees=fees, slippage=pos.entry_slippage + slip_cost, pnl=pnl,
-            pnl_pct=pnl / (pos.entry_px * pos.qty), r_multiple=(pnl / risk) if risk > 0 else None,
+            pnl_pct=pnl / (pos.entry_px * qty), r_multiple=(pnl / risk) if risk > 0 else None,
             bars_held=pos.bars_held, entry_signal_ref=pos.entry_signal_ref, exit_signal_ref=exit_signal_ref,
         )
         return Fill(date, pos.symbol, pos.strategy, "sell", pos.qty, raw_px, px, fee, slip_cost, reason, order_id), trade

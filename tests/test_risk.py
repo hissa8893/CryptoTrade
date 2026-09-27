@@ -86,20 +86,20 @@ def test_daily_loss_cap_blocks_next_days_entries_only():
 
 def test_circuit_breaker_trigger_and_release():
     rm = RiskManager(CFG, 10_000)
-    rm.on_close("d0", 12_000)  # new peak
+    rm.on_close("2024-03-01", 12_000)  # new peak
     # walk down < 3%/day so only the drawdown rule is exercised
     path = [11_700, 11_400, 11_100, 10_800, 10_500, 10_300]  # 10,300 = 14.17% below peak
     for i, eq in enumerate(path):
-        assert rm.on_close(f"a{i}", eq) == []
+        assert rm.on_close(f"2024-03-0{i + 2}", eq) == []
     assert not rm.state.breaker_active
-    ev_on = rm.on_close("d3", 10_150)  # 15.42% below peak
+    ev_on = rm.on_close("2024-03-08", 10_150)  # 15.42% below peak
     assert [e.type for e in ev_on] == ["circuit_breaker_on"] and rm.state.breaker_active
-    assert ev(rm, date="d4").check == "breaker"
-    assert rm.on_close("d4", 10_400) == [] and rm.on_close("d5", 10_700) == []  # 10.8% below: still on
+    assert ev(rm, date="2024-03-09").check == "breaker"
+    assert rm.on_close("2024-03-09", 10_400) == [] and rm.on_close("2024-03-10", 10_700) == []  # 10.8% below: still on
     assert rm.state.breaker_active
-    ev_off = rm.on_close("d6", 10_850)  # 9.58% below peak -> released
+    ev_off = rm.on_close("2024-03-11", 10_850)  # 9.58% below peak -> released
     assert [e.type for e in ev_off] == ["circuit_breaker_off"] and not rm.state.breaker_active
-    assert ev(rm, date="d7").result == "pass"
+    assert ev(rm, date="2024-03-12").result == "pass"
 
 
 def test_losing_streak_cooldown():
@@ -134,3 +134,28 @@ def test_state_roundtrip():
     rm.on_trade_closed("S1", -5, "2024-01-01")
     rm2 = RiskManager.from_dict(CFG, rm.to_dict())
     assert rm2.to_dict() == rm.to_dict()
+
+
+def test_breaker_rearms_after_30_days_flat_instead_of_blocking_forever():
+    """Regression: flat equity can never recover to within 10% of the peak, so the literal
+    rule blocked a combined portfolio for 6 years after one 15% drawdown."""
+    rm = RiskManager(CFG, 10_000)
+    rm.on_close("2024-01-01", 12_000)
+    for i, eq in enumerate([11_700, 11_400, 11_100, 10_800, 10_500, 10_200]):
+        rm.on_close(f"2024-01-0{i + 2}", eq)
+    assert rm.state.breaker_active and rm.state.breaker_since == "2024-01-07"
+    assert rm.on_close("2024-01-20", 10_200, open_positions=0) == []  # 13 days: still paused
+    assert rm.on_close("2024-02-06", 10_200, open_positions=1) == []  # 30 days but a position is open
+    ev_ = rm.on_close("2024-02-07", 10_200, open_positions=0)
+    assert [e.type for e in ev_] == ["circuit_breaker_rearmed"]
+    assert not rm.state.breaker_active and rm.state.peak_equity == 10_200
+    assert ev(rm, date="2024-02-08").result == "pass"
+
+
+def test_literal_breaker_rule_available_with_rearm_zero():
+    rm = RiskManager(RiskConfig(drawdown_rearm_days=0), 10_000)
+    rm.on_close("2024-01-01", 12_000)
+    for i, eq in enumerate([11_700, 11_400, 11_100, 10_800, 10_500, 10_200]):
+        rm.on_close(f"2024-01-0{i + 2}", eq)
+    assert rm.on_close("2025-01-01", 10_200, open_positions=0) == []
+    assert rm.state.breaker_active

@@ -185,7 +185,7 @@ class Engine:
         equity = b.equity(self.last_close)
 
         # 4. end-of-day risk bookkeeping
-        for e in self.risk.on_close(d, equity):
+        for e in self.risk.on_close(d, equity, len(b.positions)):
             self._event(e)
 
         # 5. update open positions: highest high + trailing stop (only up)
@@ -212,6 +212,55 @@ class Engine:
             b.queue(symbol=pos.symbol, strategy=pos.strategy, side="sell", qty=pos.qty, reason=sig.reason,
                     created_date=d, signal_ref=sref, decision_ref=dref)
 
+        regime = self.regime_ok(d)
+        # coins that exist as of today (a coin listed later must not shrink today's vol budget)
+        n_live = sum(1 for s in self.tradable if self.sd[s].dates[0] <= d)
+        reserved_cash = 0.0
+        added_risk = 0.0
+        open_risk_now = b.open_risk(self.last_close)
+
+        # 6b. volatility-target rebalances of open positions (S3), only if the target moved > threshold
+        for pos in list(b.positions.values()):
+            strat = self.strategies[pos.strategy]
+            i = today.get(pos.symbol)
+            if not strat.rebalances or i is None or b.has_pending(pos.strategy, pos.symbol, "sell"):
+                continue
+            sd = self.sd[pos.symbol]
+            w = strat.target_weight(sd, i, n_live)
+            dist = self.risk.initial_stop_distance(float(self.risk_atr[pos.symbol][i]))
+            if w is None or dist is None:
+                continue
+            price = float(sd.close[i])
+            target = min(w * equity / price, equity * self.risk_cfg.risk_per_trade / dist,
+                         equity * self.risk_cfg.max_position_pct / price)
+            change = (target - pos.qty) / pos.qty
+            if abs(change) <= strat.rebalance_threshold:
+                continue
+            snap = {"target_qty": target, "current_qty": pos.qty, "change": change, "weight": w}
+            sref = self._signal(d, pos.symbol, pos.strategy, "rebalance", None, snap)
+            if target < pos.qty:
+                dref = self._decision(d, sref, "pass", f"Trim {abs(change) * 100:.0f}% toward the volatility target.",
+                                      "sell", pos.qty - target, "rebalance")
+                b.queue(symbol=pos.symbol, strategy=pos.strategy, side="sell", qty=pos.qty - target,
+                        reason="rebalance_down", created_date=d, signal_ref=sref, decision_ref=dref)
+                continue
+            unit_cost = price * (1 + self.costs.slippage(pos.symbol)) * (1 + self.costs.fee_rate)
+            dec = self.risk.evaluate_add(
+                date=d, strategy=pos.strategy, symbol=pos.symbol, price=price, add_qty=target - pos.qty,
+                stop=pos.stop, equity=equity, max_affordable_qty=max(0.0, (b.cash - reserved_cash) / unit_cost),
+                open_risk=open_risk_now + added_risk, regime_ok=regime)
+            dref = self._decision(d, sref, dec.result, dec.reason, "buy" if dec.result != "blocked" else "none",
+                                  dec.qty or None, dec.check)
+            if dec.result == "blocked":
+                self._event(RiskEvent(d, f"add_blocked_{dec.check}", "info",
+                                      f"{pos.strategy} {pos.symbol} rebalance add blocked: {dec.reason}",
+                                      pos.symbol, pos.strategy, {"signal_ref": sref}))
+                continue
+            b.queue(symbol=pos.symbol, strategy=pos.strategy, side="buy", qty=dec.qty, reason="rebalance_up",
+                    created_date=d, signal_ref=sref, decision_ref=dref)
+            reserved_cash += dec.qty * unit_cost
+            added_risk += dec.qty * dec.stop_distance
+
         # 7. entries, strongest first
         candidates = []
         for sname, strat in self.strategies.items():
@@ -222,21 +271,19 @@ class Engine:
                 if sig is not None:
                     candidates.append((sig, i))
         candidates.sort(key=lambda c: (-c[0].strength, c[0].strategy, c[0].symbol))
-        regime = self.regime_ok(d)
-        reserved_cash = 0.0
-        added_risk = 0.0
         accepted = 0
-        open_risk_now = b.open_risk(self.last_close)
         for sig, i in candidates:
             sym, sname = sig.symbol, sig.strategy
             price = float(self.sd[sym].close[i])
             unit_cost = price * (1 + self.costs.slippage(sym)) * (1 + self.costs.fee_rate)
             affordable = max(0.0, (b.cash - reserved_cash) / unit_cost)
+            w = self.strategies[sname].target_weight(self.sd[sym], i, n_live)
             dec = self.risk.evaluate_entry(
                 date=d, strategy=sname, symbol=sym, price=price, atr=float(self.risk_atr[sym][i]), equity=equity,
                 max_affordable_qty=affordable, open_risk=open_risk_now + added_risk,
                 open_slots=self.risk_cfg.max_positions - len(b.positions) - accepted,
                 regime_ok=regime, filled_bar=bool(self.sd[sym].filled[i]),
+                strategy_cap_qty=(w * equity / price) if w is not None else None,
             )
             sref = self._signal(d, sym, sname, "enter", sig.strength, sig.indicators)
             action = "buy" if dec.result != "blocked" else "none"

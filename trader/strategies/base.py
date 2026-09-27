@@ -86,6 +86,16 @@ class Strategy(ABC):
     def exit(self, sd: SymbolData, i: int, highest_high: float) -> ExitSignal | None:
         """Close-based exit proposal at bar i for an open position."""
 
+    # -- optional volatility-targeted sizing (S3) ---------------------------------------
+    rebalances: bool = False  # True: engine resizes open positions toward target_weight()
+    rebalance_threshold: float = 0.0  # resize only if |target - current| / current exceeds this
+
+    def target_weight(self, sd: SymbolData, i: int, n_assets: int) -> float | None:
+        """Fraction of equity this strategy wants in the position (None = no strategy cap).
+        `n_assets` = tradable coins that ALREADY have history at bar i (never future listings).
+        It can only SHRINK a position below the risk-engine size, never enlarge it."""
+        return None
+
     def trailing_stop(self, sd: SymbolData, i: int, highest_high: float) -> float | None:
         """Optional strategy trailing stop level after bar i (the RiskManager keeps the max)."""
         return None

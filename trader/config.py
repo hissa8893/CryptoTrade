@@ -59,6 +59,11 @@ class RiskConfig(_Strict):
     daily_loss_cap: float = Field(0.03, ge=0.005, le=0.20)
     drawdown_breaker: float = Field(0.15, ge=0.02, le=0.50)
     drawdown_release: float = Field(0.10, ge=0.01, le=0.50)
+    # Without this, a breaker that trips while flat can never release (equity cannot recover
+    # with no positions), so trading stops forever. After this many days with the breaker on
+    # AND no open positions, the peak resets to current equity and the breaker re-arms.
+    # 0 = literal rule (may block forever).
+    drawdown_rearm_days: int = Field(30, ge=0, le=365)
 
     losing_streak_limit: int = Field(4, ge=1, le=20)
     cooldown_days: int = Field(5, ge=0, le=60)

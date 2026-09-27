@@ -15,7 +15,7 @@ Built in phases; each phase ends with a validation report.
 |---|---|---|
 | 1 | Skeleton, config, CLI, installer + `doctor`, DB schema/migrations, data fetch/cache/validation, indicators | ✅ done |
 | 2 | SimBroker, RiskManager, S1, BTC backtest + look-ahead proof | ✅ done |
-| 3 | S2, S3, benchmarks, walk-forward, sensitivity, Monte Carlo | pending |
+| 3 | S2, S3, benchmarks, walk-forward, sensitivity, Monte Carlo | ✅ done |
 | 4 | `trader serve`, daily job, catch-up, crash recovery, start/stop scripts | pending |
 | 5 | Dashboard + email alerts | pending |
 | 6 | Hardening, clean-install test, service install, full README | pending |
@@ -72,6 +72,32 @@ opens below the stop, the fill is at that (worse) open price. The risk engine si
 trade to risk 1% of equity, caps each position at 25% of equity and total open risk at 4%,
 allows at most 4 positions, and blocks new entries in a BTC bear market, after a 3% losing
 day, during a 15% drawdown, and after 4 losing trades in a row.
+
+## Research (Phase 3)
+
+```bash
+.venv/bin/trader research        # S1, S2, S3 + combined, on BTC, ETH, SOL, XRP  (~2 min)
+.venv/bin/trader verify lookahead -s S1 -s S2 -s S3 -a BTC -a ETH -a SOL -a XRP
+```
+
+The research report's headline numbers are all **out-of-sample** (walk-forward: settings are
+picked on 2 years of history, then scored untouched on the next 6 months, rolling forward).
+It also shows parameter-sensitivity heatmaps, a Monte Carlo of drawdowns (1,000 reshuffles
+of the trade order: plan for the "worst 5%" figure), results split by bull / bear / sideways
+market, and the **fixed default settings** over the same span.
+
+How to read it: if the fixed defaults beat the walk-forward columns, re-optimising is fitting
+noise. Keep the defaults, and never change them to chase a better backtest; that is exactly
+how backtests end up looking great and trading badly.
+
+Strategies: **S1** Donchian breakout with a chandelier trailing stop; **S2** Supertrend flip
+above the 200-day average; **S3** 30/90-day momentum above the 200-day average, sized so
+each coin gets an equal share of a 40%-a-year volatility budget, rebalanced only when the
+target moves more than 20%.
+
+Circuit breaker note: the breaker caps each losing *episode* near 15%. If it trips while
+everything is in cash, it re-arms after 30 days (`risk.drawdown_rearm_days`), because flat
+equity can never recover on its own. So the all-time peak-to-trough drawdown can exceed 15%.
 
 ## Market data
 

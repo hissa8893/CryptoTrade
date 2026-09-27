@@ -327,6 +327,47 @@ def backtest(
     typer.echo(f"  report: {path}" + (f"  (run id {res.run_id})" if res.run_id else ""))
 
 
+@app.command()
+def research(
+    strategy: list[str] = typer.Option(["S1", "S2", "S3"], "--strategy", "-s"),
+    asset: list[str] = typer.Option(["BTC", "ETH", "SOL", "XRP"], "--asset", "-a"),
+    heatmaps: bool = typer.Option(True, "--heatmaps/--no-heatmaps", help="Parameter-sensitivity grids (slower)."),
+) -> None:
+    """Walk-forward (out-of-sample) research for each strategy and the combined portfolio."""
+    import time
+
+    from trader.data import MarketData
+    from trader.research import run_research
+    from trader.research_report import write_research_report
+
+    ctx = _ctx()
+    frames, symbols = _load_frames(ctx, asset)
+    source = MarketData(ctx.cfg, ctx.paths).source
+    t0 = time.time()
+    res = run_research(ctx.cfg, frames, [x.upper() for x in strategy], symbols, data_source=source,
+                       sensitivity_grid=heatmaps, progress=lambda m: typer.echo(f"  … {m}"))
+    path = write_research_report(res, ctx.paths.reports)
+    if source == "synthetic":
+        typer.secho("⚠️  SYNTHETIC DATA — not real prices; do not tune anything to these numbers.", fg="yellow")
+    typer.echo(f"\nOut-of-sample results ({time.time() - t0:.0f}s):")
+    rows = [(n, s.wf.oos_metrics, s.wf.flags) for n, s in res.strategies.items()]
+    if res.combined:
+        rows.append(("Combined", res.combined.metrics, res.combined.flags))
+    for n, m in res.defaults.items():
+        rows.append((("Comb" if "+" in n else n) + " def", m, []))
+    rows.append(("Buy&Hold", res.benchmark_metrics, []))
+    typer.echo(f"  {'':9} {'return':>9} {'CAGR':>8} {'max DD':>8} {'Sharpe':>7} {'trades':>7}")
+    for n, m, flags in rows:
+        sh = "—" if m.sharpe is None else f"{m.sharpe:.2f}"
+        typer.echo(f"  {n:9} {m.total_return * 100:+8.1f}% {m.cagr * 100:+7.1f}% {-m.max_drawdown * 100:7.1f}% {sh:>7} {m.trades:7d}")
+        for f in flags:
+            typer.secho(f"      🚩 {f}", fg="red")
+    zc = res.zero_cost_check
+    typer.echo(f"  cost sanity: zero-cost {zc['zero_costs']:,.2f} vs with-cost {zc['with_costs']:,.2f} -> "
+               + ("OK" if zc["ok"] else "PROBLEM"))
+    typer.echo(f"  report: {path}")
+
+
 @verify_app.command("lookahead")
 def verify_lookahead(
     strategy: list[str] = typer.Option(["S1"], "--strategy", "-s"),

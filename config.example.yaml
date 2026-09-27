@@ -23,6 +23,8 @@ risk:
   daily_loss_cap: 0.03          # equity down >= 3% in a day -> no new entries next day
   drawdown_breaker: 0.15        # >= 15% below peak -> block new entries...
   drawdown_release: 0.10        # ...until back within 10% of peak
+  drawdown_rearm_days: 30       # ...or after 30 days on with NO open positions: reset the peak and re-arm
+                                #    (0 = literal rule; it can block forever because flat equity never recovers)
   losing_streak_limit: 4        # 4 losses in a row on a strategy ->
   cooldown_days: 5              # ...pause that strategy's entries for 5 days
 

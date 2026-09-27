@@ -55,6 +55,7 @@ class RiskState:
     peak_equity: float
     prev_equity: float
     breaker_active: bool = False
+    breaker_since: str | None = None
     daily_loss_block_date: str | None = None
     streaks: dict[str, int] = field(default_factory=dict)
     cooldown_until: dict[str, str] = field(default_factory=dict)
@@ -70,7 +71,7 @@ class RiskManager:
         self.state = state or RiskState(peak_equity=starting_equity, prev_equity=starting_equity)
 
     # -- end-of-day bookkeeping ---------------------------------------------------------
-    def on_close(self, date: str, equity: float) -> list[RiskEvent]:
+    def on_close(self, date: str, equity: float, open_positions: int = 0) -> list[RiskEvent]:
         s, c, ev = self.state, self.cfg, []
         change = equity / s.prev_equity - 1 if s.prev_equity > 0 else 0.0
         if change <= -c.daily_loss_cap:
@@ -83,13 +84,24 @@ class RiskManager:
         dd = 1 - equity / s.peak_equity if s.peak_equity > 0 else 0.0
         if not s.breaker_active and dd >= c.drawdown_breaker:
             s.breaker_active = True
+            s.breaker_since = date
             ev.append(RiskEvent(date, "circuit_breaker_on", "urgent",
                                 f"Circuit breaker ON: equity is {_pct(dd)} below its peak (limit {_pct(c.drawdown_breaker)}). "
                                 f"New entries blocked until back within {_pct(c.drawdown_release)} of the peak; "
                                 "open positions keep their stops.",
                                 details={"drawdown": dd, "equity": equity, "peak": s.peak_equity}))
+        elif (s.breaker_active and c.drawdown_rearm_days and open_positions == 0 and s.breaker_since
+              and (Date.fromisoformat(date) - Date.fromisoformat(s.breaker_since)).days >= c.drawdown_rearm_days):
+            old_peak = s.peak_equity
+            s.breaker_active, s.breaker_since, s.peak_equity = False, None, equity
+            ev.append(RiskEvent(date, "circuit_breaker_rearmed", "warn",
+                                f"Circuit breaker re-armed after {c.drawdown_rearm_days}+ days fully in cash: equity "
+                                f"{equity:,.2f} could not recover with no positions, so the peak resets from "
+                                f"{old_peak:,.2f} to {equity:,.2f}. Another {_pct(c.drawdown_breaker)} drop from here "
+                                "trips it again.", details={"old_peak": old_peak, "equity": equity}))
         elif s.breaker_active and dd <= c.drawdown_release:
             s.breaker_active = False
+            s.breaker_since = None
             ev.append(RiskEvent(date, "circuit_breaker_off", "info",
                                 f"Circuit breaker OFF: drawdown recovered to {_pct(dd)} (release at {_pct(c.drawdown_release)}). "
                                 "New entries allowed again.",
@@ -199,6 +211,54 @@ class RiskManager:
         if notes:
             return EntryDecision("shrunk", qty, dist, "; ".join(notes).capitalize() + ".", "size", sizing)
         return EntryDecision("pass", qty, dist, f"Risk {_pct(c.risk_per_trade)} of equity with stop {dist:,.2f} below entry.", "ok", sizing)
+
+    def evaluate_add(
+        self,
+        *,
+        date: str,
+        strategy: str,
+        symbol: str,
+        price: float,
+        add_qty: float,
+        stop: float,
+        equity: float,
+        max_affordable_qty: float,
+        open_risk: float,
+        regime_ok: bool | None,
+    ) -> EntryDecision:
+        """Increase an open position (volatility-target rebalance). Same gates as a new entry;
+        the add can only be shrunk or blocked, and the position's stop is unchanged."""
+        c, s = self.cfg, self.state
+        dist = max(price - stop, 0.0)
+
+        def blocked(check: str, reason: str) -> EntryDecision:
+            return EntryDecision("blocked", 0.0, dist, reason, check, {"requested": add_qty})
+
+        if c.regime_filter_enabled and not regime_ok:
+            return blocked("regime", f"{c.regime_asset} regime is not bullish; not adding to {symbol}.")
+        qty, notes = min(add_qty, max_affordable_qty), []
+        if qty < add_qty * (1 - 1e-9):
+            notes.append("add capped by available cash")
+        allowed = c.max_portfolio_heat * equity - open_risk
+        if dist > 0:
+            if allowed <= 0:
+                return blocked("heat", f"Portfolio heat is full ({_pct(open_risk / equity)} of equity); not adding.")
+            if qty * dist > allowed:
+                qty = allowed / dist
+                notes.append(f"add shrunk to fit the {_pct(c.max_portfolio_heat)} portfolio-heat limit")
+        if s.daily_loss_block_date == date:
+            return blocked("daily_loss", "Daily loss cap hit today; not adding.")
+        if s.breaker_active:
+            return blocked("breaker", "Circuit breaker is on; not adding.")
+        until = s.cooldown_until.get(strategy)
+        if until and date < until:
+            return blocked("cooldown", f"{strategy} is paused until {until}; not adding.")
+        if qty * price < MIN_NOTIONAL:
+            return blocked("size", f"Add would be only ${qty * price:,.2f}; skipped.")
+        sizing = {"requested": add_qty, "final_qty": qty, "stop": stop}
+        if notes:
+            return EntryDecision("shrunk", qty, dist, "; ".join(notes).capitalize() + ".", "size", sizing)
+        return EntryDecision("pass", qty, dist, "Rebalance add toward the volatility target.", "ok", sizing)
 
     # -- state ------------------------------------------------------------------------------
     def to_dict(self) -> dict:

@@ -70,7 +70,7 @@ def buy_and_hold(frames: dict[str, pd.DataFrame], symbols: list[str], start: str
 def eval_start(cfg: AppConfig, frames: dict[str, pd.DataFrame], strategies, regime_symbol: str | None) -> str:
     """First date where every strategy's indicators and the regime filter are valid."""
     warm = max(s.warmup_bars() for s in strategies)
-    starts = [df.index[min(warm, len(df) - 1)] for df in frames.values()]
+    starts = [df.index[min(warm, len(df) - 1)] for df in frames.values() if len(df)]
     first = min(starts)
     if cfg.risk.regime_filter_enabled and regime_symbol in frames:
         reg = frames[regime_symbol]
@@ -98,7 +98,11 @@ def make_engine(
     if end:
         frames = {s: df.loc[:end] for s, df in frames.items()}
     start = max(start or "0000", eval_start(cfg, frames, strategies, regime_symbol))
-    end = end or max(df.index[-1] for df in frames.values()).date().isoformat()
+    end = end or max(df.index[-1] for df in frames.values() if len(df)).date().isoformat()
+    # a coin with no history yet (listed after `end`) simply is not tradable in this run
+    symbols = [s for s in symbols if len(frames[s])]
+    if not symbols:
+        raise ValueError(f"none of the requested symbols has data before {end}")
     engine_frames = {s: frames[s] for s in symbols}
     if cfg.risk.regime_filter_enabled and regime_symbol and regime_symbol not in engine_frames:
         engine_frames[regime_symbol] = frames[regime_symbol]
