@@ -39,6 +39,9 @@ downloads price history, and finishes with `trader doctor`.
 
 ## Useful commands (Phase 1)
 
+There is no app to start yet: `start.sh` and the dashboard arrive in Phases 4–5. Run these
+from the project folder (`cd ~/CryptoTrade` if you cloned it into your home folder):
+
 ```bash
 .venv/bin/trader doctor            # ✅/❌ health checklist  (--full adds pip-audit)
 .venv/bin/trader data fetch        # download/refresh + validate daily candles
