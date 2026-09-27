@@ -24,6 +24,23 @@ python_hint() {
   esac
 }
 
+# ---------------------------------------------------------------- 0. ownership preflight
+# Running the installer (or pip) with sudo leaves root-owned files that later runs cannot
+# replace, which surfaces as cryptic pip "Lacking write permission" errors.
+me_uid="$(id -u)"
+owner_uid="$(ls -nd "$ROOT" | awk '{print $3}')"
+if [ "$me_uid" = "0" ] && [ "$owner_uid" != "0" ]; then
+  die "Don't run the installer with sudo. Run it as yourself:  ./install.sh"
+fi
+foreign="$(find "$ROOT" ! -user "$me_uid" 2>/dev/null | head -n 1)"
+if [ -n "$foreign" ]; then
+  say "❌ Some files in this folder belong to another user (usually from an earlier 'sudo' run), e.g.:"
+  say "     $foreign"
+  say "   Fix it once with (asks for your password), then re-run ./install.sh :"
+  say "     sudo chown -R \"$(id -un)\" \"$ROOT\""
+  exit 1
+fi
+
 # ---------------------------------------------------------------- 1. find Python 3.11+
 step "Checking for Python ${PY_MIN_MAJOR}.${PY_MIN_MINOR}+"
 PY=""
