@@ -14,7 +14,7 @@ Built in phases; each phase ends with a validation report.
 | Phase | Scope | State |
 |---|---|---|
 | 1 | Skeleton, config, CLI, installer + `doctor`, DB schema/migrations, data fetch/cache/validation, indicators | ✅ done |
-| 2 | SimBroker, RiskManager, S1, BTC backtest + look-ahead proof | pending |
+| 2 | SimBroker, RiskManager, S1, BTC backtest + look-ahead proof | ✅ done |
 | 3 | S2, S3, benchmarks, walk-forward, sensitivity, Monte Carlo | pending |
 | 4 | `trader serve`, daily job, catch-up, crash recovery, start/stop scripts | pending |
 | 5 | Dashboard + email alerts | pending |
@@ -52,6 +52,26 @@ from the project folder (`cd ~/CryptoTrade` if you cloned it into your home fold
 .venv/bin/trader db backup         # online backup to data/backups (keeps 14)
 .venv/bin/python -m pytest         # run the test suite
 ```
+
+## Backtesting (Phase 2)
+
+```bash
+.venv/bin/trader backtest -s S1 -a BTC            # event-driven backtest -> HTML report in reports/
+.venv/bin/trader backtest -s S1 -a BTC --zero-costs --no-save   # sanity check: must beat the run with costs
+.venv/bin/trader verify lookahead -s S1 -a BTC    # proof: decisions at day t never use data after t
+```
+
+Open the report file it prints (e.g. `open reports/backtest_S1_BTC_*.html` on macOS). Every
+report shows red flags at the top (fewer than 30 trades, profit factor > 3, Sharpe > 3), a
+SYNTHETIC banner if the prices were generated rather than downloaded, the equity curve vs
+Buy & Hold, drawdowns, every metric, and every trade.
+
+How the simulation trades: a decision made at the close of day t fills at the open of day
+t+1 plus slippage, and pays a 0.10% fee per side. Stops are resting orders; if the price
+opens below the stop, the fill is at that (worse) open price. The risk engine sizes every
+trade to risk 1% of equity, caps each position at 25% of equity and total open risk at 4%,
+allows at most 4 positions, and blocks new entries in a BTC bear market, after a 3% losing
+day, during a 15% drawdown, and after 4 losing trades in a row.
 
 ## Market data
 

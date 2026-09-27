@@ -257,6 +257,102 @@ def data_status() -> None:
     raise typer.Exit(1 if bad else 0)
 
 
+# ----------------------------------------------------------------------------- backtest
+verify_app = typer.Typer(no_args_is_help=True, pretty_exceptions_show_locals=False, help="Correctness proofs.")
+app.add_typer(verify_app, name="verify")
+
+
+def _load_frames(ctx: Ctx, assets: list[str]) -> tuple[dict, list[str]]:
+    """Validated frames for the requested assets plus the regime asset. Exits on missing data."""
+    from trader.data import DataError, MarketData
+
+    md = MarketData(ctx.cfg, ctx.paths)
+    by_asset = {s.split("/")[0]: s for s in md.symbols()}
+    wanted = [a.upper() for a in assets]
+    need = set(wanted) | ({ctx.cfg.risk.regime_asset} if ctx.cfg.risk.regime_filter_enabled else set())
+    frames = {}
+    for a in sorted(need):
+        sym = by_asset.get(a)
+        if sym is None:
+            typer.secho(f"❌ no data for {a}; run: {cli_hint('data fetch')}", fg="red", err=True)
+            raise typer.Exit(1)
+        try:
+            frames[sym] = md.load(sym)
+        except DataError as exc:
+            typer.secho(f"❌ {exc}", fg="red", err=True)
+            raise typer.Exit(1)
+    return frames, [by_asset[a] for a in wanted]
+
+
+@app.command()
+def backtest(
+    strategy: list[str] = typer.Option(["S1"], "--strategy", "-s", help="Strategy (repeat for a combined portfolio)."),
+    asset: list[str] = typer.Option(["BTC"], "--asset", "-a", help="Asset(s) to trade."),
+    start: Optional[str] = typer.Option(None, help="First date (YYYY-MM-DD); default: first date indicators are valid."),
+    end: Optional[str] = typer.Option(None, help="Last date (YYYY-MM-DD)."),
+    zero_costs: bool = typer.Option(False, "--zero-costs", help="SANITY CHECK ONLY: disable fees and slippage."),
+    save: bool = typer.Option(True, "--save/--no-save", help="Write the run to the database."),
+) -> None:
+    """Run an event-driven backtest and write an HTML report to reports/."""
+    from trader.backtest import persist_backtest, run_backtest
+    from trader.broker import CostModel
+    from trader.data import MarketData
+    from trader.db import Database
+    from trader.reports import write_report
+
+    ctx = _ctx()
+    frames, symbols = _load_frames(ctx, asset)
+    source = MarketData(ctx.cfg, ctx.paths).source
+    costs = CostModel.zero() if zero_costs else CostModel.from_config(ctx.cfg.costs)
+    res = run_backtest(ctx.cfg, frames, [x.upper() for x in strategy], symbols=symbols, data_source=source,
+                       start=start, end=end, costs=costs)
+    if save:
+        db = Database(ctx.paths.db_file)
+        db.migrate()
+        persist_backtest(db, ctx.paths, res)
+    path = write_report(res, ctx.paths.reports)
+    m = res.metrics
+    if source == "synthetic":
+        typer.secho("⚠️  SYNTHETIC DATA — not real prices; results say nothing about real markets.", fg="yellow")
+    if zero_costs:
+        typer.secho("⚠️  ZERO-COST sanity run (fees and slippage disabled).", fg="yellow")
+    typer.echo(f"{res.label}: {m.start} → {m.end}")
+    for f in res.flags:
+        typer.secho(f"🚩 {f}", fg="red")
+    bm = res.benchmarks[0].metrics
+    typer.echo(f"  total return {m.total_return * 100:+.2f}%  (B&H {bm.total_return * 100:+.2f}%)")
+    typer.echo(f"  CAGR {m.cagr * 100:+.2f}%  max DD -{m.max_drawdown * 100:.2f}%  Sharpe "
+               f"{m.sharpe if m.sharpe is None else round(m.sharpe, 2)}  trades {m.trades}  win rate "
+               f"{'-' if m.win_rate is None else f'{m.win_rate * 100:.1f}%'}  fees ${m.fees:,.2f}")
+    typer.echo(f"  report: {path}" + (f"  (run id {res.run_id})" if res.run_id else ""))
+
+
+@verify_app.command("lookahead")
+def verify_lookahead(
+    strategy: list[str] = typer.Option(["S1"], "--strategy", "-s"),
+    asset: list[str] = typer.Option(["BTC"], "--asset", "-a"),
+    samples: int = typer.Option(250, help="How many days to re-run on truncated data (>= 200)."),
+) -> None:
+    """Prove decisions at day t do not depend on data after t."""
+    import time
+
+    from trader.lookahead import lookahead_proof
+
+    ctx = _ctx()
+    frames, symbols = _load_frames(ctx, asset)
+    t0 = time.time()
+    rep = lookahead_proof(ctx.cfg, frames, [x.upper() for x in strategy], symbols=symbols, samples=samples)
+    typer.echo(f"look-ahead proof: {rep.dates_checked} days re-run on truncated data "
+               f"({rep.dates_with_signals} with signals; {rep.signals_compared} signals, {rep.orders_compared} orders "
+               f"compared) in {time.time() - t0:.1f}s")
+    if rep.passed:
+        typer.secho("✅ PASS — every decision and the full engine state matched the full-history run exactly", fg="green")
+        return
+    typer.secho(f"❌ FAIL — {len(rep.mismatches)} mismatching day(s), first: {rep.mismatches[0]['date']} "
+                f"({rep.mismatches[0]['kind']})", fg="red")
+    raise typer.Exit(1)
+
+
 def main() -> None:
     try:
         app()
