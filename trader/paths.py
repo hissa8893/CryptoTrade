@@ -83,3 +83,14 @@ class Paths:
 
 def get_paths(root: Path | None = None) -> Paths:
     return Paths(root=(root or default_root()))
+
+
+def venv_bin(program: str) -> str:
+    """How to invoke a program from the project's virtualenv, as the user would type it."""
+    return f".venv\\Scripts\\{program}" if os.name == "nt" else f".venv/bin/{program}"
+
+
+def cli_hint(args: str) -> str:
+    """A `trader ...` command the user can actually run from the project folder.
+    (`trader` alone is usually not on PATH; it lives inside .venv.)"""
+    return f"{venv_bin('trader')} {args}"

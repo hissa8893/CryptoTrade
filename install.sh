@@ -27,7 +27,7 @@ python_hint() {
 # ---------------------------------------------------------------- 1. find Python 3.11+
 step "Checking for Python ${PY_MIN_MAJOR}.${PY_MIN_MINOR}+"
 PY=""
-for cand in python3.12 python3.13 python3.11 python3 python; do
+for cand in python3.12 python3.13 python3.11 python3.14 python3 python; do
   if command -v "$cand" >/dev/null 2>&1; then
     if "$cand" -c "import sys; sys.exit(0 if sys.version_info >= (${PY_MIN_MAJOR}, ${PY_MIN_MINOR}) else 1)" >/dev/null 2>&1; then
       PY="$(command -v "$cand")"

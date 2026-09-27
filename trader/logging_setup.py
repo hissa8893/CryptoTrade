@@ -43,6 +43,23 @@ class JsonFormatter(logging.Formatter):
         return _redact(json.dumps(payload, default=str))
 
 
+class CurrentStderrHandler(logging.StreamHandler):
+    """Writes to whatever sys.stderr is at emit time. A plain StreamHandler keeps the stream
+    it was created with, which breaks ("I/O operation on closed file") once that stream is
+    swapped or closed, e.g. by a test runner or when a background process detaches."""
+
+    def __init__(self) -> None:
+        super().__init__(sys.stderr)
+
+    @property  # type: ignore[override]
+    def stream(self):
+        return sys.stderr
+
+    @stream.setter
+    def stream(self, _value) -> None:
+        pass
+
+
 class ConsoleFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         return _redact(super().format(record))
@@ -67,7 +84,7 @@ def setup_logging(logs_dir: Path | None, *, level: str = "INFO", console: bool =
         fh.setFormatter(JsonFormatter())
         root.addHandler(fh)
     if console:
-        ch = logging.StreamHandler(sys.stderr)
+        ch = CurrentStderrHandler()
         ch.setLevel(logging.WARNING)
         ch.setFormatter(ConsoleFormatter("%(levelname)s %(name)s: %(message)s"))
         root.addHandler(ch)

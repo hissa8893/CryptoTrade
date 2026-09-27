@@ -23,7 +23,7 @@ import numpy as np
 import pandas as pd
 
 from trader.config import CAPPED_HISTORY_EXCHANGES, AppConfig
-from trader.paths import Paths
+from trader.paths import Paths, cli_hint
 from trader.timeutil import (
     MS_PER_DAY,
     UTC,
@@ -40,6 +40,10 @@ OHLCV_COLUMNS = ["open", "high", "low", "close", "volume"]
 TIMEFRAME_MS = {"1d": MS_PER_DAY}
 PAGE_LIMITS = {"bitstamp": 1000, "coinbaseexchange": 300, "binance": 1000, "binanceus": 1000}
 DEFAULT_PAGE_LIMIT = 300
+# History may be trimmed at a long exchange gap only if at least this many days remain after
+# it (200-day SMA warm-up + a year of use). A more recent long gap is an error instead: it
+# must never silently shrink history to a few days.
+MIN_HISTORY_AFTER_TRIM_DAYS = 400
 
 
 class DataError(RuntimeError):
@@ -253,6 +257,8 @@ class ValidationReport:
 
     def summary(self) -> str:
         status = "OK" if self.ok else "FAILED"
+        if not self.rows:
+            return f"{self.symbol}: {status}" + (" — " + "; ".join(self.errors) if self.errors else "")
         parts = [f"{self.symbol}: {status}", f"{self.rows} rows", f"{self.start} .. {self.end}"]
         if self.filled_days:
             parts.append(f"{self.filled_days} gap day(s) filled flat")
@@ -271,6 +277,7 @@ def clean_and_validate(
     *,
     now: datetime | None = None,
     max_fill_gap_days: int = 3,
+    check_gaps: bool = True,
 ) -> tuple[pd.DataFrame, ValidationReport]:
     """Validate raw candles and return a clean, gap-free daily frame plus a report.
 
@@ -279,7 +286,8 @@ def clean_and_validate(
     Handled explicitly (and reported): unclosed last candle (dropped), exact
     duplicates (dropped), conflicting duplicates (newest kept), small gaps
     (<= max_fill_gap_days, filled flat with filled=True), large gaps (history
-    before the gap is trimmed off).
+    before the gap is trimmed off if >= MIN_HISTORY_AFTER_TRIM_DAYS remain after
+    it; otherwise the series is rejected).
     """
     now = now or now_utc()
     rep = ValidationReport(symbol=symbol)
@@ -346,7 +354,7 @@ def clean_and_validate(
         )
 
     # 5. gaps
-    if len(df) >= 2 and not rep.misaligned:
+    if check_gaps and len(df) >= 2 and not rep.misaligned:
         df = _handle_gaps(df, rep, max_fill_gap_days)
 
     rep.rows = len(df)
@@ -378,6 +386,16 @@ def _handle_gaps(df: pd.DataFrame, rep: ValidationReport, max_fill: int) -> pd.D
         )
     if not large.empty:
         cut = large.index[-1]
+        remaining = (df.index[-1] - cut).days + 1
+        if remaining < MIN_HISTORY_AFTER_TRIM_DAYS:
+            g = next(g for g in rep.gaps if g["before"] == cut.date().isoformat())
+            g["action"] = "rejected"
+            rep.errors.append(
+                f"{g['missing_days']}-day data gap between {g['after']} and {g['before']} is too recent to trim "
+                f"(only {remaining} days would remain; {MIN_HISTORY_AFTER_TRIM_DAYS} needed). Not tradable until "
+                f"the exchange backfills it; then run: {cli_hint('data fetch --full-refresh')}"
+            )
+            return df
         df = df[df.index >= cut]
         rep.trimmed_before = cut.date().isoformat()
         rep.warnings.append(
@@ -421,6 +439,9 @@ def freshness_problem(df: pd.DataFrame, now: datetime | None = None) -> str | No
 # Parquet cache
 # --------------------------------------------------------------------------------------
 class OhlcvCache:
+    """Stores RAW closed candles (open/high/low/close/volume, deduplicated). Gap filling and
+    trimming are recomputed on every load, so a policy decision never destroys history."""
+
     def __init__(self, cache_dir: Path, source: str):
         self.dir = Path(cache_dir) / source
         self.source = source
@@ -442,7 +463,9 @@ class OhlcvCache:
         if df.index.tz is None:
             df.index = df.index.tz_localize(UTC)
         df.index.name = "date"
-        return df
+        if "filled" in df.columns:  # legacy (pre-raw) cache: synthetic gap-fill rows are not real candles
+            df = df[~df["filled"].astype(bool)]
+        return df[OHLCV_COLUMNS]
 
     def meta(self, symbol: str, timeframe: str = "1d") -> dict:
         p = self.meta_path(symbol, timeframe)
@@ -452,7 +475,7 @@ class OhlcvCache:
         self.dir.mkdir(parents=True, exist_ok=True)
         p = self.path(symbol, timeframe)
         tmp = p.with_suffix(".parquet.tmp")
-        df.to_parquet(tmp, engine="pyarrow")
+        df[OHLCV_COLUMNS].to_parquet(tmp, engine="pyarrow")
         os.replace(tmp, p)
         mp = self.meta_path(symbol, timeframe)
         mtmp = mp.with_suffix(".json.tmp")
@@ -479,6 +502,7 @@ class UpdateResult:
     fetched: int
     report: ValidationReport
     fresh_problem: str | None
+    revised: int = 0
 
 
 class MarketData:
@@ -525,10 +549,16 @@ class MarketData:
 
             return {a: ("synthetic", f"{a}/USD") for a in self.cfg.data.assets if a in SYNTHETIC_ASSETS}
         f = self._symbols_file()
+        fingerprint = {
+            "exchange": self.cfg.data.exchange,
+            "fallback_exchanges": self.cfg.data.fallback_exchanges,
+            "quote_preference": self.cfg.data.quote_preference,
+        }
         if f.exists() and not refresh:
             saved = json.loads(f.read_text())
-            if set(saved) >= set(self.cfg.data.assets):
-                return {a: tuple(saved[a]) for a in self.cfg.data.assets}  # type: ignore[misc]
+            # reuse only if resolved under the SAME settings (else a config change is silently ignored)
+            if saved.get("config") == fingerprint and set(saved.get("assets", {})) >= set(self.cfg.data.assets):
+                return {a: tuple(saved["assets"][a]) for a in self.cfg.data.assets}  # type: ignore[misc]
         out: dict[str, tuple[str, str]] = {}
         remaining = list(self.cfg.data.assets)
         for ex_id in [self.cfg.data.exchange, *self.cfg.data.fallback_exchanges]:
@@ -555,7 +585,7 @@ class MarketData:
         if remaining:
             log.warning("no market found for assets %s", remaining)
         self.cache.dir.mkdir(parents=True, exist_ok=True)
-        f.write_text(json.dumps({a: list(v) for a, v in out.items()}, indent=2))
+        f.write_text(json.dumps({"config": fingerprint, "assets": {a: list(v) for a, v in out.items()}}, indent=2))
         return out
 
     # -- update --------------------------------------------------------------------
@@ -577,7 +607,12 @@ class MarketData:
                 results.append(UpdateResult(asset, "-", 0, rep, "no market"))
                 continue
             ex_id, symbol = mapping[asset]
-            results.append(self._update_symbol(ex_id, symbol, full_refresh=full_refresh, now=now))
+            try:
+                results.append(self._update_symbol(ex_id, symbol, full_refresh=full_refresh, now=now))
+            except Exception as exc:  # network down, exchange error: report it, keep going
+                log.error("update failed for %s on %s: %s: %s", symbol, ex_id, type(exc).__name__, exc)
+                rep = ValidationReport(symbol=symbol, errors=[f"{ex_id} fetch failed: {type(exc).__name__}: {exc}"])
+                results.append(UpdateResult(symbol, ex_id, 0, rep, "fetch failed; cached data unchanged"))
         return results
 
     def _update_symbol(self, ex_id: str, symbol: str, *, full_refresh: bool, now: datetime) -> UpdateResult:
@@ -598,33 +633,34 @@ class MarketData:
             base_delay=self.cfg.data.retry_base_delay,
             sleep=self._sleep,
         )
-        new = candles_to_frame(rows)
+        new = candles_to_frame(rows)[OHLCV_COLUMNS]
+        new = new[~new.index.duplicated(keep="last")].sort_index()
+        # a malformed new batch must never overwrite good cached data
+        _, new_rep = clean_and_validate(new, symbol, now=now, check_gaps=False) if len(new) else (None, None)
+        if new_rep is not None and new_rep.errors:
+            rep = ValidationReport(symbol=symbol, errors=[f"new data rejected: {e}" for e in new_rep.errors])
+            log.error("rejected new candles for %s: %s", symbol, new_rep.errors)
+            return UpdateResult(symbol, ex_id, len(rows), rep, "new data rejected; cached data unchanged")
+        revised = 0
         if cached is not None and len(cached):
-            base = cached[~cached["filled"]] if "filled" in cached else cached
-            # newest values last, so duplicate handling keeps the fresh fetch
-            merged = pd.concat([base.drop(columns=["filled"], errors="ignore"), new.drop(columns=["filled"])])
-            merged["filled"] = False
+            overlap = cached.index.intersection(new.index)
+            if len(overlap):
+                diff = ~np.isclose(cached.loc[overlap, OHLCV_COLUMNS], new.loc[overlap, OHLCV_COLUMNS], rtol=0, atol=0)
+                revised = int(diff.any(axis=1).sum())
+            merged = pd.concat([cached[OHLCV_COLUMNS], new])  # newest last -> kept
             merged = merged[~merged.index.duplicated(keep="last")].sort_index()
         else:
             merged = new
-        clean, rep = clean_and_validate(
-            merged, symbol, now=now, max_fill_gap_days=self.cfg.data.max_fill_gap_days
-        )
+        closed = (merged.index + pd.Timedelta(days=1)) <= pd.Timestamp(now)
+        merged = merged[closed]
+        cache.save(symbol, merged, {"symbol": symbol, "exchange": ex_id, "fetched_at": iso(now)})
+        clean, rep = clean_and_validate(merged, symbol, now=now, max_fill_gap_days=self.cfg.data.max_fill_gap_days)
+        if revised:
+            rep.warnings.append(f"{revised} recent candle(s) were revised by the exchange; kept the newest values")
         fresh = freshness_problem(clean, now) if rep.ok else "validation failed"
-        if rep.ok:
-            cache.save(
-                symbol,
-                clean,
-                {
-                    "symbol": symbol,
-                    "exchange": ex_id,
-                    "fetched_at": iso(now),
-                    "validation": rep.to_dict(),
-                },
-            )
-        else:
+        if not rep.ok:
             log.error("validation failed for %s: %s", symbol, rep.errors)
-        return UpdateResult(symbol, ex_id, len(rows), rep, fresh)
+        return UpdateResult(symbol, ex_id, len(rows), rep, fresh, revised)
 
     def _update_synthetic(self, assets: list[str] | None, now: datetime) -> list[UpdateResult]:
         from trader.synthetic import generate
@@ -643,8 +679,8 @@ class MarketData:
             if rep.ok:
                 self.cache.save(
                     symbol,
-                    clean,
-                    {"symbol": symbol, "exchange": "synthetic", "fetched_at": iso(now), "validation": rep.to_dict(),
+                    raw,
+                    {"symbol": symbol, "exchange": "synthetic", "fetched_at": iso(now),
                      "WARNING": "SYNTHETIC DATA - not real market prices"},
                 )
             results.append(UpdateResult(symbol, "synthetic", len(raw), rep, freshness_problem(clean, now)))
@@ -657,21 +693,31 @@ class MarketData:
         f = self._symbols_file()
         if not f.exists():
             return self.cache.symbols()
-        saved = json.loads(f.read_text())
+        saved = json.loads(f.read_text()).get("assets", {})
         return [saved[a][1] for a in self.cfg.data.assets if a in saved]
 
-    def load(self, symbol: str) -> pd.DataFrame:
-        df = self.cache.load(symbol)
-        if df is None:
-            raise DataError(f"no cached data for {symbol} ({self.source}); run `trader data fetch`")
+    def load_checked(self, symbol: str, now: datetime | None = None) -> tuple[pd.DataFrame, ValidationReport]:
+        """Cached raw candles -> (clean frame, validation report). Raises if nothing is cached."""
+        raw = self.cache.load(symbol)
+        if raw is None:
+            raise DataError(f"no cached data for {symbol} ({self.source}); run: {cli_hint('data fetch')}")
+        return clean_and_validate(raw, symbol, now=now, max_fill_gap_days=self.cfg.data.max_fill_gap_days)
+
+    def load(self, symbol: str, now: datetime | None = None) -> pd.DataFrame:
+        """Clean, validated candles; raises DataError if the cached series fails validation."""
+        df, rep = self.load_checked(symbol, now)
+        if not rep.ok:
+            raise DataError(f"{symbol} failed validation: " + "; ".join(rep.errors))
         return df
 
-    def load_all(self) -> dict[str, pd.DataFrame]:
+    def load_all(self, now: datetime | None = None) -> dict[str, pd.DataFrame]:
+        """Every cached symbol that passes validation (failures are logged, never traded)."""
         out = {}
         for sym in self.symbols():
-            df = self.cache.load(sym)
-            if df is not None and len(df):
-                out[sym] = df
+            try:
+                out[sym] = self.load(sym, now)
+            except DataError as exc:
+                log.error("excluding %s: %s", sym, exc)
         return out
 
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import importlib
 import os
-import smtplib
 import socket
 import stat
 import subprocess
@@ -15,7 +14,7 @@ from email.utils import parsedate_to_datetime
 from typing import Callable
 
 from trader.config import AppConfig, Secrets, load_config, load_secrets
-from trader.paths import Paths
+from trader.paths import Paths, cli_hint, venv_bin
 
 REQUIRED_PACKAGES = [
     "ccxt", "pandas", "numpy", "sqlalchemy", "apscheduler", "fastapi", "uvicorn", "jinja2",
@@ -102,7 +101,7 @@ def check_db(paths: Paths) -> Check:
     try:
         cur, latest = db.schema_version(), db.latest_version()
         if cur < latest:
-            return Check("Database", "fail", f"schema v{cur} < v{latest} — run `trader db migrate`")
+            return Check("Database", "fail", f"schema v{cur} < v{latest} — run: {cli_hint('db migrate')}")
         db.set_kv("doctor_last_check", str(time.time()))
         with db.read() as c:
             mode = c.exec_driver_sql("PRAGMA journal_mode").scalar()
@@ -142,12 +141,16 @@ def check_cache(cfg: AppConfig, paths: Paths) -> Check:
     md = MarketData(cfg, paths)
     syms = md.symbols()
     if not syms:
-        return Check("Price history cached", "fail", "no cached data — run `trader data fetch`")
+        return Check("Price history cached", "fail", f"no cached data — run: {cli_hint('data fetch')}")
     parts, status = [], "ok"
     for s in syms:
-        df = md.cache.load(s)
-        if df is None:
+        if md.cache.load(s) is None:
             parts.append(f"{s}: none")
+            status = "fail"
+            continue
+        df, rep = md.load_checked(s)
+        if not rep.ok:
+            parts.append(f"{s}: NOT TRADABLE ({'; '.join(rep.errors)})")
             status = "fail"
             continue
         yrs = history_years(df)
@@ -234,13 +237,10 @@ def check_alerts(cfg: AppConfig, secrets: Secrets, send_test: bool = False) -> C
     if ch == "email":
         if not secrets.email_configured():
             return Check("Alert channel (email)", "skip", "not configured yet — fill SMTP_* and ALERT_EMAIL_* in .env")
-        with smtplib.SMTP(secrets.smtp_host, secrets.smtp_port, timeout=15) as smtp:
-            smtp.ehlo()
-            if secrets.smtp_starttls:
-                smtp.starttls()
-                smtp.ehlo()
-            if secrets.smtp_user and secrets.smtp_password:
-                smtp.login(secrets.smtp_user, secrets.smtp_password.get_secret_value())
+        from trader.alerts import smtp_connect
+
+        with smtp_connect(secrets, timeout=15):
+            pass
         if send_test:
             from trader.alerts import send_test_alert
 
@@ -264,15 +264,15 @@ def check_pip_audit(paths: Paths) -> Check:
     try:
         importlib.import_module("pip_audit")
     except ImportError:
-        return Check("pip-audit (dependency CVEs)", "warn", "pip-audit not installed — pip install -r requirements-dev.txt")
+        return Check("pip-audit (dependency CVEs)", "warn", f"pip-audit not installed — run: {venv_bin('pip')} install -r requirements-dev.txt")
     out = subprocess.run(
-        [sys.executable, "-m", "pip_audit", "-r", str(req), "--progress-spinner", "off"],
+        [sys.executable, "-m", "pip_audit", "-r", str(req), "--no-deps", "--disable-pip", "--progress-spinner", "off"],
         capture_output=True, text=True, timeout=600,
     )
-    text = (out.stdout + out.stderr).strip()
+    lines = [l for l in (out.stdout + out.stderr).splitlines() if l.strip() and not l.startswith("WARNING:")]
     if out.returncode == 0:
-        return Check("pip-audit (dependency CVEs)", "ok", text.splitlines()[-1] if text else "no known vulnerabilities")
-    return Check("pip-audit (dependency CVEs)", "fail", text[-2000:])
+        return Check("pip-audit (dependency CVEs)", "ok", lines[-1] if lines else "no known vulnerabilities")
+    return Check("pip-audit (dependency CVEs)", "fail", "\n      ".join(lines)[-2000:])
 
 
 def run_doctor(paths: Paths, *, full: bool = False, send_test_alert: bool = False, network: bool = True) -> list[Check]:

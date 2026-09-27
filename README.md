@@ -23,7 +23,8 @@ Built in phases; each phase ends with a validation report.
 
 ## Install (macOS / Linux)
 
-Requires Python 3.11 or 3.12 (`brew install python@3.12` on macOS).
+Requires Python 3.11–3.14 (`brew install python@3.12` on macOS). Works on Apple Silicon and Intel Macs:
+every pinned package has a prebuilt wheel for both, so no compiler is needed.
 
 ```bash
 ./install.sh          # or double-click install.command in Finder
@@ -43,7 +44,8 @@ There is no app to start yet: `start.sh` and the dashboard arrive in Phases 4–
 from the project folder (`cd ~/CryptoTrade` if you cloned it into your home folder):
 
 ```bash
-.venv/bin/trader doctor            # ✅/❌ health checklist  (--full adds pip-audit)
+.venv/bin/trader doctor            # ✅/❌ health checklist
+.venv/bin/pip install -r requirements-dev.txt && .venv/bin/trader doctor --full   # + dependency CVE audit
 .venv/bin/trader data fetch        # download/refresh + validate daily candles
 .venv/bin/trader data status       # what is cached, date ranges, freshness
 .venv/bin/trader db status         # schema version and row counts
@@ -53,13 +55,22 @@ from the project folder (`cd ~/CryptoTrade` if you cloned it into your home fold
 
 ## Market data
 
-* Default exchange: **Bitstamp** (reachable from the US, USD pairs, BTC history back to 2011).
+* Default exchange: **Bitstamp** (reachable from the US, USD pairs, 1000 daily candles per request).
+  `trader data status` shows the actual first date retrieved for each coin.
   Coinbase Exchange is the fallback, used only for an asset Bitstamp does not list, so each
   price series always comes from a single exchange.
 * Public endpoints only, through a read-only wrapper that refuses to hold credentials.
-* Every fetch is validated: no duplicate timestamps, no gaps (gaps ≤ 3 days are filled flat
-  and flagged, longer gaps trim history and are reported), `high ≥ max(open, close)`,
+* Every fetch is validated: no duplicate timestamps, `high ≥ max(open, close)`,
   `low ≤ min(open, close)`, `volume ≥ 0`, and the still-open candle for today is never used.
+  A malformed new batch never overwrites good cached data, and candles the exchange revises
+  after the fact are reported.
+* Gaps: up to 3 missing days are filled flat at the previous close and flagged (never traded
+  on). A longer gap trims the history before it only if at least 400 days remain after it;
+  a more recent long gap makes that coin **not tradable** (shown by `data status` and the
+  doctor) until the exchange backfills it and you run `.venv/bin/trader data fetch --full-refresh`.
+* The cache keeps the raw candles, so gap handling never destroys downloaded history.
+* If the exchange is unreachable, each coin reports the failure and keeps its cached data;
+  nothing trades on stale prices.
 * `data.source: synthetic` generates clearly-labelled **synthetic** prices for offline testing only.
 
 ## Configuration

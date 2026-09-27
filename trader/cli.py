@@ -17,12 +17,14 @@ import typer
 from trader import __version__
 from trader.config import AppConfig, ConfigError, Secrets, assert_paper_mode, load_config, load_secrets
 from trader.logging_setup import register_secrets, setup_logging
-from trader.paths import Paths, get_paths
+from trader.paths import Paths, cli_hint, get_paths
 
-app = typer.Typer(no_args_is_help=True, add_completion=False, help="Paper-trading-only daily crypto agent (SIMULATION ONLY).")
-db_app = typer.Typer(no_args_is_help=True, help="Database commands.")
-data_app = typer.Typer(no_args_is_help=True, help="Market data commands.")
-config_app = typer.Typer(no_args_is_help=True, help="Configuration commands.")
+# pretty_exceptions_show_locals=False: a crash must never print local variables, which may hold secrets
+app = typer.Typer(no_args_is_help=True, add_completion=False, pretty_exceptions_show_locals=False,
+                  help="Paper-trading-only daily crypto agent (SIMULATION ONLY).")
+db_app = typer.Typer(no_args_is_help=True, pretty_exceptions_show_locals=False, help="Database commands.")
+data_app = typer.Typer(no_args_is_help=True, pretty_exceptions_show_locals=False, help="Market data commands.")
+config_app = typer.Typer(no_args_is_help=True, pretty_exceptions_show_locals=False, help="Configuration commands.")
 app.add_typer(db_app, name="db")
 app.add_typer(data_app, name="data")
 app.add_typer(config_app, name="config")
@@ -222,27 +224,37 @@ def data_fetch(
 @data_app.command("status")
 def data_status() -> None:
     """Show what is cached for each symbol."""
-    from trader.data import MarketData, freshness_problem, history_years
+    from trader.data import DataError, MarketData, freshness_problem, history_years
 
     ctx = _ctx()
     md = MarketData(ctx.cfg, ctx.paths)
     syms = md.symbols()
     if not syms:
-        typer.echo("no cached data — run `trader data fetch`")
+        typer.echo(f"no cached data — run: {cli_hint('data fetch')}")
         raise typer.Exit(1)
     typer.echo(f"source: {md.source}" + ("  (SYNTHETIC — not real prices)" if md.source == "synthetic" else ""))
+    bad = 0
     for s in syms:
-        df = md.cache.load(s)
-        if df is None:
-            typer.echo(f"  {s:<10} not cached")
+        try:
+            df, rep = md.load_checked(s)
+        except DataError:
+            typer.echo(f"  ❌ {s:<10} not cached")
+            bad += 1
             continue
         meta = md.cache.meta(s)
-        filled = int(df["filled"].sum()) if "filled" in df else 0
+        if not rep.ok:
+            typer.echo(f"  ❌ {s:<10} NOT TRADABLE — " + "; ".join(rep.errors))
+            bad += 1
+            continue
         fresh = freshness_problem(df) or "fresh"
+        icon = "✅" if fresh == "fresh" else "⚠️ "
         typer.echo(
-            f"  {s:<10} {len(df):>5} bars  {df.index[0].date()} → {df.index[-1].date()}  "
-            f"({history_years(df):.1f}y)  filled={filled}  {fresh}  fetched_at={meta.get('fetched_at')}"
+            f"  {icon} {s:<10} {len(df):>5} bars  {df.index[0].date()} → {df.index[-1].date()}  "
+            f"({history_years(df):.1f}y)  filled={rep.filled_days}  {fresh}  fetched_at={meta.get('fetched_at')}"
         )
+        for w in rep.warnings:
+            typer.echo(f"       note: {w}")
+    raise typer.Exit(1 if bad else 0)
 
 
 def main() -> None:

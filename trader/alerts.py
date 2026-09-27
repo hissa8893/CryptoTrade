@@ -24,14 +24,28 @@ def send_email(secrets: Secrets, subject: str, body: str) -> None:
     msg["From"] = secrets.alert_email_from or secrets.smtp_user
     msg["To"] = secrets.alert_email_to
     msg.set_content(body)
-    with smtplib.SMTP(secrets.smtp_host, secrets.smtp_port, timeout=20) as smtp:
+    with smtp_connect(secrets, timeout=20) as smtp:
+        smtp.send_message(msg)
+
+
+def smtp_connect(secrets: Secrets, timeout: float = 20) -> smtplib.SMTP:
+    """Connected + logged-in SMTP client. Port 465 uses implicit TLS (SMTP_SSL);
+    other ports use STARTTLS when SMTP_STARTTLS is true (default)."""
+    if secrets.smtp_port == 465:
+        smtp: smtplib.SMTP = smtplib.SMTP_SSL(secrets.smtp_host, secrets.smtp_port, timeout=timeout)
+    else:
+        smtp = smtplib.SMTP(secrets.smtp_host, secrets.smtp_port, timeout=timeout)
+    try:
         smtp.ehlo()
-        if secrets.smtp_starttls:
+        if secrets.smtp_port != 465 and secrets.smtp_starttls:
             smtp.starttls()
             smtp.ehlo()
         if secrets.smtp_user and secrets.smtp_password:
             smtp.login(secrets.smtp_user, secrets.smtp_password.get_secret_value())
-        smtp.send_message(msg)
+    except Exception:
+        smtp.close()
+        raise
+    return smtp
 
 
 def send_telegram(secrets: Secrets, text: str) -> None:
