@@ -25,3 +25,6 @@ markers = [
     "network: needs internet access to the configured exchange (skipped when unreachable)",
     "slow: long-running test",
 ]
+filterwarnings = [
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated",
+]

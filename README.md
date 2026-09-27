@@ -16,7 +16,7 @@ Built in phases; each phase ends with a validation report.
 | 1 | Skeleton, config, CLI, installer + `doctor`, DB schema/migrations, data fetch/cache/validation, indicators | ✅ done |
 | 2 | SimBroker, RiskManager, S1, BTC backtest + look-ahead proof | ✅ done |
 | 3 | S2, S3, benchmarks, walk-forward, sensitivity, Monte Carlo | ✅ done |
-| 4 | `trader serve`, daily job, catch-up, crash recovery, start/stop scripts | pending |
+| 4 | `trader serve`, daily job, catch-up, crash recovery, start/stop scripts | ✅ done |
 | 5 | Dashboard + email alerts | pending |
 | 6 | Hardening, clean-install test, service install, full README | pending |
 | 7 | Optional LLM analyst layer | pending |
@@ -52,6 +52,38 @@ from the project folder (`cd ~/CryptoTrade` if you cloned it into your home fold
 .venv/bin/trader db backup         # online backup to data/backups (keeps 14)
 .venv/bin/python -m pytest         # run the test suite
 ```
+
+## Daily use (Phase 4)
+
+Double-click in Finder, or run in Terminal from the CryptoTrade folder:
+
+| | Terminal | Finder (macOS) |
+|---|---|---|
+| Start in the background | `./start.sh` | `start.command` |
+| Is it running? | `./status.sh` | `status.command` |
+| Stop | `./stop.sh` | `stop.command` |
+| Restart | `./restart.sh` | `restart.command` |
+| Watch the log | `./logs.sh -f` | `logs.command` |
+
+`status` prints one line, for example:
+`● running · PID 4242 · up 3h 12m · last successful run: day 2026-09-26 (finished 9 h ago) · next run: 2026-09-28 00:10 UTC`
+
+What happens while it runs:
+
+* Every day at **00:10 UTC** it processes the day that just closed, for four paper accounts:
+  S1, S2 and S3 each with $10,000, plus a combined PORTFOLIO account running all three.
+* **Asleep or switched off?** On start-up, and every 5 minutes, it checks for closed days it has
+  not processed and runs them **in order**. Nothing is skipped and nothing runs twice.
+* **Crash, kill or power cut mid-run?** Each day is saved in one all-or-nothing database
+  transaction. An interrupted day leaves nothing behind and is simply re-run on the next start.
+* **Exchange down or data bad?** It never trades on stale data. The day is marked skipped, an
+  urgent alert is queued, and it retries automatically.
+* A database backup is written to `data/backups/` after each successful run (last 14 kept).
+
+`stop` asks the trader to finish any work in progress and exit cleanly. If it has not exited
+within 30 seconds it is force-killed, and `stop` tells you so. `run-once` processes pending days in
+the foreground without the background server (it refuses if the trader is already running).
+The Windows `.bat` files are generated but **untested**.
 
 ## Backtesting (Phase 2)
 

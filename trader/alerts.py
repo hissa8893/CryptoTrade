@@ -84,3 +84,44 @@ def send_test_alert(cfg: AppConfig, secrets: Secrets) -> bool:
         f"This is a test alert from your paper-trading agent at {now_iso()} UTC. "
         "No action needed. (Simulation only - no real trades.)",
     )
+
+
+# ------------------------------------------------------------------------------ queue
+# Alerts are first written to the `alerts` table (inside the same transaction as the event that
+# caused them, with a dedupe key), then dispatched. Re-running a day can never re-send.
+def queue_alert(c, severity: str, subject: str, body: str, dedupe_key: str) -> None:
+    from sqlalchemy import text
+
+    c.execute(text(
+        "INSERT INTO alerts (created_at, severity, subject, body, dedupe_key, status) "
+        "VALUES (:t, :sev, :s, :b, :k, 'pending') ON CONFLICT (dedupe_key) DO NOTHING"),
+        {"t": now_iso(), "sev": severity, "s": subject, "b": body, "k": dedupe_key})
+
+
+def dispatch_pending(cfg: AppConfig, secrets: Secrets, db) -> dict:
+    """Send every pending alert through the configured channel. Unconfigured channel ->
+    marked 'skipped' (still visible on the dashboard). Never raises."""
+    from sqlalchemy import text
+
+    counts = {"sent": 0, "skipped": 0, "failed": 0}
+    with db.read() as c:
+        rows = c.execute(text("SELECT id, severity, subject, body FROM alerts WHERE status = 'pending' ORDER BY id")).fetchall()
+    configured = (cfg.alerts.channel == "email" and secrets.email_configured()) or \
+                 (cfg.alerts.channel == "telegram" and secrets.telegram_configured())
+    for aid, sev, subject, body in rows:
+        if sev == "info" and not cfg.alerts.daily_summary:
+            status, err = "skipped", "daily summary disabled"
+        elif not configured:
+            status, err = "skipped", f"alert channel '{cfg.alerts.channel}' not configured"
+        else:
+            try:
+                send_alert(cfg, secrets, subject, body)
+                status, err = "sent", None
+            except Exception as exc:  # delivery problems must never break trading
+                status, err = "failed", f"{type(exc).__name__}: {exc}"
+                log.warning("alert %s failed: %s", aid, err)
+        counts[status] += 1
+        with db.tx() as c:
+            c.execute(text("UPDATE alerts SET status = :s, sent_at = :t, error = :e WHERE id = :i"),
+                      {"s": status, "t": now_iso(), "e": err, "i": aid})
+    return counts

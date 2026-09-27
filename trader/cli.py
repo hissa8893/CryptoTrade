@@ -394,6 +394,90 @@ def verify_lookahead(
     raise typer.Exit(1)
 
 
+# ----------------------------------------------------------------------------- runtime / control
+@app.command()
+def serve() -> None:
+    """Run the trader in the foreground (scheduler + dashboard in one process). Use `start` for background."""
+    from trader.server import serve as _serve
+
+    ctx = _ctx()
+    ctx.paths.ensure_dirs()
+    _serve(ctx.cfg, ctx.paths)
+
+
+@app.command()
+def start(no_browser: bool = typer.Option(False, "--no-browser", help="Do not open the dashboard."),
+          wait: float = typer.Option(60.0, help="Seconds to wait for the server to answer.")) -> None:
+    """Start the trader in the background (does nothing if it is already running)."""
+    from trader import control
+
+    ctx = _ctx()
+    ctx.paths.ensure_dirs()
+    raise typer.Exit(control.start(ctx.cfg, ctx.paths, open_browser=not no_browser, wait=wait))
+
+
+@app.command()
+def stop(timeout: float = typer.Option(30.0, help="Seconds to wait for a graceful stop before force-killing.")) -> None:
+    """Stop the trader gracefully (finishes any in-progress day first)."""
+    from trader import control
+
+    ctx = _ctx()
+    raise typer.Exit(control.stop(ctx.cfg, ctx.paths, timeout=timeout))
+
+
+@app.command()
+def status() -> None:
+    """One line: running/stopped, PID, uptime, last successful daily run, next run."""
+    from trader import control
+
+    ctx = _ctx()
+    raise typer.Exit(control.status(ctx.cfg, ctx.paths))
+
+
+@app.command()
+def restart(no_browser: bool = typer.Option(False, "--no-browser")) -> None:
+    """Stop, then start."""
+    from trader import control
+
+    ctx = _ctx()
+    raise typer.Exit(control.restart(ctx.cfg, ctx.paths, open_browser=not no_browser))
+
+
+@app.command()
+def logs(lines: int = typer.Option(40, "--lines", "-n"), follow: bool = typer.Option(False, "--follow", "-f")) -> None:
+    """Show the most recent log lines (-f to keep following)."""
+    from trader import control
+
+    ctx = _ctx()
+    raise typer.Exit(control.logs(ctx.paths, lines=lines, follow=follow))
+
+
+@app.command("run-once")
+def run_once(force: bool = typer.Option(False, "--force", help="Run even though the background trader is running.")) -> None:
+    """Process every closed day that has not been processed yet, now, in the foreground."""
+    from trader.control import running_pid
+    from trader.runtime import Runtime
+
+    ctx = _ctx()
+    ctx.paths.ensure_dirs()
+    pid = running_pid(ctx.paths)
+    if pid and not force:
+        typer.echo(f"the trader is running (PID {pid}) and processes days itself; use --force to run anyway")
+        raise typer.Exit(1)
+    rt = Runtime(ctx.cfg, ctx.paths)
+    results = rt.catch_up("manual")
+    if not results:
+        typer.echo("nothing to do: every closed day is already processed")
+        return
+    for r in results:
+        icon = {"ok": "✅", "skipped": "⚠️ ", "failed": "❌"}[r.status]
+        typer.echo(f"{icon} {r.bar_date} {r.status}" + (f": {r.error}" if r.error else ""))
+        for key, v in r.accounts.items():
+            typer.echo(f"     {key.split(':')[-1]:<10} equity ${v['equity']:,.2f}  positions {v['positions']}  "
+                       f"trades closed today {v['trades_closed']}")
+    raise typer.Exit(0 if all(r.status == "ok" for r in results) else 1)
+
+
 def main() -> None:
     try:
         app()

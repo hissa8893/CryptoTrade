@@ -1,0 +1,400 @@
+"""Daily paper-trading runtime (used by `trader serve` and `trader run-once`).
+
+For every UTC day whose candle has closed and that has not been processed yet, IN ORDER:
+  confirm the day is closed -> fetch + validate data -> run each paper account's engine
+  for that day (fills at the open, stops, mark-to-market, signals, risk checks, orders for
+  the next open) -> write everything -> snapshot equity -> alerts -> heartbeat.
+
+Guarantees:
+* One atomic transaction per day across all accounts: a crash or kill mid-day leaves no
+  partial rows; the day is simply re-run from the saved state of the day before.
+* Idempotent: a day marked ok is never processed again; the engine refuses to re-step a
+  day; unique constraints reject duplicates.
+* Catch-up: after downtime (Mac asleep/off) every missed day is processed in order.
+* Never trades on stale data: if the data for a day is missing or invalid for the market
+  regime asset or for any coin with an open position, the day is marked `skipped`, an
+  urgent alert is queued, and it is retried later.
+* Accounts: each enabled strategy is its own sub-account, plus one combined PORTFOLIO
+  account; all use the SAME engine code as backtests.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import threading
+import time
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+from pathlib import Path
+
+from sqlalchemy import text
+
+from trader import __version__
+from trader.alerts import dispatch_pending, queue_alert
+from trader.backtest import make_engine
+from trader.config import AppConfig, Secrets, load_secrets
+from trader.data import MarketData
+from trader.db import Database, git_commit
+from trader.journal_store import save_engine_state, write_journal, write_positions
+from trader.paths import Paths
+from trader.strategies import AVAILABLE
+from trader.timeutil import last_closed_day, now_iso, now_utc
+
+log = logging.getLogger(__name__)
+
+RETRY_SECONDS = 15 * 60  # after a failed/skipped attempt, wait this long before the watchdog retries
+
+
+# ------------------------------------------------------------------------------ cross-process lock
+class FileLock:
+    """Non-blocking exclusive lock on a file (so a daemon and `run-once` never process at once)."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self._fh = None
+
+    def acquire(self) -> bool:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._fh = open(self.path, "a+")
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(self._fh.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except OSError:
+            self._fh.close()
+            self._fh = None
+            return False
+
+    def release(self) -> None:
+        if self._fh is None:
+            return
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                self._fh.seek(0)
+                msvcrt.locking(self._fh.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._fh.close()
+            self._fh = None
+
+
+@dataclass
+class DayResult:
+    bar_date: str
+    status: str  # ok | skipped | failed
+    error: str | None = None
+    accounts: dict = field(default_factory=dict)  # run_key -> summary
+
+
+def _test_pause_in_tx(paths: Paths) -> None:
+    """TEST HOOK ONLY: pause inside the day's transaction so a test can kill the process
+    mid-write and prove nothing partial is committed."""
+    secs = os.environ.get("TRADER_TEST_PAUSE_IN_TX")
+    if secs:
+        (paths.run / "in_tx.marker").write_text(str(os.getpid()))
+        time.sleep(float(secs))
+
+
+class Runtime:
+    def __init__(self, cfg: AppConfig, paths: Paths, *, db: Database | None = None,
+                 market_data: MarketData | None = None, secrets: Secrets | None = None):
+        self.cfg = cfg
+        self.paths = paths
+        self.db = db or Database(paths.db_file)
+        self.db.migrate()
+        self.md = market_data or MarketData(cfg, paths)
+        self.secrets = secrets or load_secrets(paths)
+        self._lock = threading.Lock()
+        self._failed_at: dict[str, float] = {}
+        self.busy = False
+
+    # -- accounts ----------------------------------------------------------------------------
+    def accounts(self) -> list[tuple[str, list[str]]]:
+        enabled = [s for s in AVAILABLE if getattr(self.cfg.strategies, s.lower()).enabled]
+        src = self.md.source
+        accts = [(f"paper:{src}:{s}", [s]) for s in enabled]
+        if len(enabled) > 1:
+            accts.append((f"paper:{src}:PORTFOLIO", enabled))
+        return accts
+
+    def _ensure_runs(self, c, first_day: str) -> dict[str, tuple[int, str]]:
+        out = {}
+        for key, strategies in self.accounts():
+            row = c.execute(text("SELECT id, start FROM runs WHERE run_key = :k"), {"k": key}).fetchone()
+            if row is None:
+                params = {"strategies": {s: getattr(self.cfg.strategies, s.lower()).model_dump() for s in strategies},
+                          "risk": self.cfg.risk.model_dump(), "costs": self.cfg.costs.model_dump()}
+                c.execute(text(
+                    "INSERT INTO runs (run_key, mode, strategy, params_json, start, created_at, git_commit, app_version, "
+                    "starting_equity, data_source) VALUES (:k, 'paper', :s, :p, :st, :c, :g, :v, :eq, :src)"),
+                    {"k": key, "s": "PORTFOLIO" if len(strategies) > 1 else strategies[0], "p": json.dumps(params),
+                     "st": first_day, "c": now_iso(), "g": git_commit(self.paths.root), "v": __version__,
+                     "eq": self.cfg.accounts.starting_equity, "src": self.md.source})
+                row = c.execute(text("SELECT id, start FROM runs WHERE run_key = :k"), {"k": key}).fetchone()
+                log.info("created paper account %s starting %s", key, first_day)
+            out[key] = (int(row[0]), row[1])
+        return out
+
+    def _states(self) -> dict[str, dict]:
+        keys = [k for k, _ in self.accounts()]
+        with self.db.read() as c:
+            rows = c.execute(text(
+                "SELECT r.run_key, s.state_json FROM runs r JOIN run_state s ON s.run_id = r.id")).fetchall()
+        return {k: json.loads(v) for k, v in rows if k in keys}
+
+    # -- schedule ----------------------------------------------------------------------------
+    def last_ok(self) -> tuple[str, str] | None:
+        """(bar_date, finished_at) of the most recent successfully processed day."""
+        with self.db.read() as c:
+            row = c.execute(text(
+                "SELECT bar_date, finished_at FROM job_runs WHERE status = 'ok' ORDER BY bar_date DESC LIMIT 1")).fetchone()
+        return (row[0], row[1]) if row else None
+
+    def pending_days(self, now=None) -> list[str]:
+        """Closed days not yet processed. The very first run starts with the latest closed day."""
+        last_closed = last_closed_day(now)
+        ok = self.last_ok()
+        if ok is None:
+            return [last_closed.isoformat()]
+        d, out = date.fromisoformat(ok[0]) + timedelta(days=1), []
+        while d <= last_closed:
+            out.append(d.isoformat())
+            d += timedelta(days=1)
+        return out
+
+    def heartbeat(self) -> None:
+        self.db.set_kv("heartbeat", now_iso())
+
+    # -- entry points -------------------------------------------------------------------------
+    def catch_up_if_due(self) -> list[DayResult]:
+        """Watchdog (every few minutes): run if a closed day is waiting, with a back-off after
+        failures. Also what rescues a daily run missed while the computer was asleep."""
+        days = self.pending_days()
+        if not days:
+            return []
+        failed = self._failed_at.get(days[0])
+        if failed is not None and time.monotonic() - failed < RETRY_SECONDS:
+            return []
+        return self.catch_up("watchdog")
+
+    def catch_up(self, reason: str = "manual") -> list[DayResult]:
+        if not self._lock.acquire(blocking=False):
+            log.info("catch-up already in progress in this process; skipping (%s)", reason)
+            return []
+        flock = FileLock(self.paths.run / "catchup.lock")
+        if not flock.acquire():
+            self._lock.release()
+            log.info("another process is processing days; skipping (%s)", reason)
+            return []
+        self.busy = True
+        try:
+            self.recover()
+            self.heartbeat()
+            days = self.pending_days()
+            if not days:
+                return []
+            log.info("catch-up (%s): %d day(s) to process: %s .. %s", reason, len(days), days[0], days[-1])
+            fetch_error, updates = None, []
+            try:
+                updates = self.md.update()
+            except Exception as exc:  # exchange down etc.: cached data is still checked per day below
+                fetch_error = f"{type(exc).__name__}: {exc}"
+                log.error("data update failed: %s", fetch_error)
+            frames = self.md.load_all()
+            results = []
+            for d in days:
+                r = self.run_day(d, frames, updates, fetch_error)
+                results.append(r)
+                if r.status != "ok":
+                    self._failed_at[d] = time.monotonic()
+                    break
+                self._failed_at.pop(d, None)
+            ok_days = [r for r in results if r.status == "ok"]
+            if ok_days:
+                self._queue_daily_summary(ok_days[-1])
+                try:
+                    dest = self.db.backup(self.paths.backups, keep=14)
+                    log.info("database backed up to %s", dest)
+                except Exception:
+                    log.exception("database backup failed")
+            try:
+                dispatch_pending(self.cfg, self.secrets, self.db)
+            except Exception:
+                log.exception("alert dispatch failed")
+            self.heartbeat()
+            return results
+        finally:
+            self.busy = False
+            flock.release()
+            self._lock.release()
+
+    # -- crash recovery -------------------------------------------------------------------------
+    def recover(self) -> dict:
+        """Run before anything else: find days interrupted mid-run and make sure the positions
+        table matches the saved engine state (the source of truth)."""
+        summary = {"interrupted": [], "reconciled": []}
+        with self.db.tx() as c:
+            for (d, attempts) in c.execute(text("SELECT bar_date, attempts FROM job_runs WHERE status = 'running'")).fetchall():
+                c.execute(text("UPDATE job_runs SET status = 'failed', finished_at = :t, "
+                               "error = 'interrupted (process stopped mid-run); will be re-processed' WHERE bar_date = :d"),
+                          {"t": now_iso(), "d": d})
+                c.execute(text(
+                    "INSERT INTO risk_events (run_id, ts, bar_date, type, severity, message, details_json, dedupe_key) "
+                    "VALUES (NULL, :ts, :d, 'run_interrupted', 'warn', :m, '{}', :k) ON CONFLICT (dedupe_key) DO NOTHING"),
+                    {"ts": now_iso(), "d": d, "k": f"job:{d}:interrupted:{attempts}",
+                     "m": f"The run for {d} was interrupted (crash, kill or power loss). Nothing from it was saved; "
+                          "it is being re-processed from the previous day's saved state."})
+                summary["interrupted"].append(d)
+                log.warning("day %s was interrupted mid-run; will re-process", d)
+            rows = c.execute(text(
+                "SELECT r.id, r.run_key, s.state_json FROM runs r JOIN run_state s ON s.run_id = r.id "
+                "WHERE r.mode = 'paper'")).fetchall()
+            for run_id, key, sj in rows:
+                state = json.loads(sj)
+                want = sorted((p["strategy"], p["symbol"], round(p["qty"], 12), round(p["stop"], 10))
+                              for p in state["broker"]["positions"])
+                have = sorted((s, sym, round(q, 12), round(st, 10)) for s, sym, q, st in c.execute(text(
+                    "SELECT strategy, symbol, qty, current_stop FROM positions WHERE run_id = :r"), {"r": run_id}))
+                if want != have:
+                    write_positions(c, run_id, state["broker"]["positions"], state.get("last_close", {}), now_iso())
+                    c.execute(text(
+                        "INSERT INTO risk_events (run_id, ts, bar_date, type, severity, message, details_json, dedupe_key) "
+                        "VALUES (:r, :ts, :d, 'positions_reconciled', 'warn', :m, '{}', :k) "
+                        "ON CONFLICT (dedupe_key) DO NOTHING"),
+                        {"r": run_id, "ts": now_iso(), "d": state.get("last_date"),
+                         "k": f"{key}:reconcile:{now_iso()}",
+                         "m": "Open-positions table did not match the saved engine state; rebuilt it from the saved state."})
+                    summary["reconciled"].append(key)
+                    log.warning("reconciled positions table for %s", key)
+        return summary
+
+    # -- one day ------------------------------------------------------------------------------
+    def _data_problems(self, d: str, frames: dict, updates, fetch_error: str | None) -> dict[str, str]:
+        problems = {}
+        for sym in self.md.symbols():
+            df = frames.get(sym)
+            if df is None or df.empty:
+                problems[sym] = "no validated data (see `trader data status`)"
+            elif df.index[-1].date().isoformat() < d:
+                problems[sym] = f"stale: last candle {df.index[-1].date()}, need {d}"
+        for u in updates or []:
+            if not u.report.ok and u.symbol not in problems:
+                problems[u.symbol] = "; ".join(u.report.errors)
+        if fetch_error:
+            for sym in list(problems):
+                problems[sym] += f" (fetch failed: {fetch_error})"
+        return problems
+
+    def run_day(self, d: str, frames: dict, updates=None, fetch_error: str | None = None) -> DayResult:
+        started = now_iso()
+        with self.db.tx() as c:
+            c.execute(text(
+                "INSERT INTO job_runs (bar_date, started_at, status, heartbeat_at, attempts) VALUES (:d, :t, 'running', :t, 1) "
+                "ON CONFLICT (bar_date) DO UPDATE SET started_at = :t, status = 'running', heartbeat_at = :t, "
+                "finished_at = NULL, error = NULL, attempts = job_runs.attempts + 1"), {"d": d, "t": started})
+
+        regime_sym = next((s for s in self.md.symbols() if s.split("/")[0] == self.cfg.risk.regime_asset), None)
+        problems = self._data_problems(d, frames, updates, fetch_error)
+        held = {p["symbol"] for st in self._states().values() for p in st["broker"]["positions"]}
+        held |= {o["symbol"] for st in self._states().values() for o in st["broker"]["pending"]}
+        blocking = {s: why for s, why in problems.items() if s == regime_sym or s in held}
+        if not self.md.symbols():
+            blocking["data"] = "no price data has been downloaded yet" + (
+                f" (download failed: {fetch_error})" if fetch_error else "; run: .venv/bin/trader data fetch")
+        elif regime_sym is None:
+            blocking["regime"] = (f"no {self.cfg.risk.regime_asset} price data (needed for the market-regime filter)"
+                                  + (f"; download failed: {fetch_error}" if fetch_error else ""))
+        if blocking:
+            why = "; ".join(f"{s}: {w}" for s, w in blocking.items())
+            return self._give_up(d, "skipped", f"data not ready/valid for {d} — {why}", "data_not_ready")
+
+        tradable = [s for s in self.md.symbols() if s not in problems]
+        try:
+            accounts_out = {}
+            with self.db.tx() as c:
+                runs = self._ensure_runs(c, d)
+                for sym, why in problems.items():  # excluded today, but nothing is held in them
+                    c.execute(text(
+                        "INSERT INTO risk_events (run_id, ts, bar_date, type, severity, symbol, message, details_json, "
+                        "dedupe_key) VALUES (NULL, :ts, :d, 'symbol_excluded', 'warn', :sym, :m, '{}', :k) "
+                        "ON CONFLICT (dedupe_key) DO NOTHING"),
+                        {"ts": now_iso(), "d": d, "sym": sym, "k": f"job:{d}:excluded:{sym}",
+                         "m": f"{sym} not traded on {d}: {why}. No position is held in it."})
+                    queue_alert(c, "urgent", f"[trader] data problem: {sym}", f"{sym} excluded from trading on {d}: {why}",
+                                f"data:{d}:{sym}")
+                for key, strategies in self.accounts():
+                    run_id, start = runs[key]
+                    row = c.execute(text("SELECT state_json FROM run_state WHERE run_id = :r"), {"r": run_id}).fetchone()
+                    state = json.loads(row[0]) if row else None
+                    if state and state["last_date"] and state["last_date"] >= d:
+                        continue  # defensive: this account already has day d
+                    engine_frames = {s: df.loc[:d] for s, df in frames.items() if s in tradable}
+                    eng, *_ = make_engine(self.cfg, engine_frames, strategies, symbols=tradable, start=start)
+                    if state:
+                        eng.load_state(state)
+                    j = eng.run(until=d)
+                    if eng.last_date != d:
+                        raise RuntimeError(f"{key}: engine did not process {d} (last {eng.last_date})")
+                    write_journal(c, run_id, key, j, now_iso())
+                    save_engine_state(c, run_id, eng, now_iso())
+                    for e in j.events:
+                        if e.severity == "urgent":
+                            queue_alert(c, "urgent", f"[trader] {key.split(':')[-1]}: {e.type.replace('_', ' ')}",
+                                        f"{d}: {e.message}", f"ev:{key}:{e.date}:{e.type}")
+                    eq = j.equity[-1]
+                    accounts_out[key] = {"equity": eq["equity"], "positions": eq["positions"],
+                                         "trades_closed": len(j.trades), "drawdown": eq["drawdown_pct"]}
+                _test_pause_in_tx(self.paths)
+                c.execute(text("UPDATE job_runs SET status = 'ok', finished_at = :t, heartbeat_at = :t, error = NULL "
+                               "WHERE bar_date = :d"), {"t": now_iso(), "d": d})
+            log.info("processed %s for %d account(s)", d, len(accounts_out))
+            return DayResult(d, "ok", None, accounts_out)
+        except Exception as exc:
+            log.exception("run for %s failed", d)
+            return self._give_up(d, "failed", f"{type(exc).__name__}: {exc}", "run_failed")
+
+    def _give_up(self, d: str, status: str, error: str, event_type: str) -> DayResult:
+        with self.db.tx() as c:
+            c.execute(text("UPDATE job_runs SET status = :s, finished_at = :t, error = :e WHERE bar_date = :d"),
+                      {"s": status, "t": now_iso(), "e": error, "d": d})
+            attempts = c.execute(text("SELECT attempts FROM job_runs WHERE bar_date = :d"), {"d": d}).scalar()
+            msg = (f"Daily run for {d} {status}: {error}. Nothing was traded for this day; it is retried "
+                   f"automatically (attempt {attempts}).")
+            # ONE event per day and cause, refreshed on each retry (a long outage must not flood the feed)
+            c.execute(text(
+                "INSERT INTO risk_events (run_id, ts, bar_date, type, severity, message, details_json, dedupe_key) "
+                "VALUES (NULL, :ts, :d, :t, 'urgent', :m, :det, :k) ON CONFLICT (dedupe_key) DO UPDATE SET "
+                "ts = excluded.ts, message = excluded.message, details_json = excluded.details_json"),
+                {"ts": now_iso(), "d": d, "t": event_type, "m": msg, "k": f"job:{d}:{event_type}",
+                 "det": json.dumps({"attempts": attempts})})
+            queue_alert(c, "urgent", f"[trader] daily run {status} for {d}", msg, f"job:{d}:{status}")
+        log.error("day %s %s: %s", d, status, error)
+        return DayResult(d, status, error)
+
+    def _queue_daily_summary(self, r: DayResult) -> None:
+        lines = []
+        with self.db.read() as c:
+            for key, v in r.accounts.items():
+                prev = c.execute(text(
+                    "SELECT e.equity FROM equity_snapshots e JOIN runs r ON r.id = e.run_id WHERE r.run_key = :k "
+                    "AND e.bar_date < :d ORDER BY e.bar_date DESC LIMIT 1"), {"k": key, "d": r.bar_date}).scalar()
+                base = prev if prev else self.cfg.accounts.starting_equity
+                pnl = v["equity"] - base
+                lines.append(f"{key.split(':')[-1]}: equity ${v['equity']:,.2f}, day P&L {'+' if pnl >= 0 else '-'}"
+                             f"${abs(pnl):,.2f} ({pnl / base * 100:+.2f}%), open positions {v['positions']}")
+        body = f"Paper trading summary for {r.bar_date} (UTC, simulation only):\n" + "\n".join(lines)
+        with self.db.tx() as c:
+            queue_alert(c, "info", f"[trader] daily summary {r.bar_date}", body, f"summary:{r.bar_date}")

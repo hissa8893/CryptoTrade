@@ -167,34 +167,17 @@ def check_cache(cfg: AppConfig, paths: Paths) -> Check:
     return Check(f"{src}Price history cached", status, "; ".join(parts))
 
 
-def _pid_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    if os.name == "nt":
-        out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}"], capture_output=True, text=True)
-        return str(pid) in out.stdout
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
-
-
 def check_port(cfg: AppConfig, paths: Paths) -> Check:
     host, port = cfg.server.host, cfg.server.port
     s = socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET, socket.SOCK_STREAM)
     try:
         s.bind((host, port))
     except OSError:
-        if paths.pid_file.exists():
-            try:
-                pid = int(paths.pid_file.read_text().strip())
-                if _pid_alive(pid):
-                    return Check("Dashboard port", "ok", f"{host}:{port} in use by the running trader (PID {pid})")
-            except ValueError:
-                pass
+        from trader.control import running_pid
+
+        pid = running_pid(paths)
+        if pid:
+            return Check("Dashboard port", "ok", f"{host}:{port} in use by the running trader (PID {pid})")
         return Check("Dashboard port", "fail", f"{host}:{port} is in use by another program — change server.port")
     finally:
         s.close()
