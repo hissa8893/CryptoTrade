@@ -3,17 +3,26 @@
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 PACKAGE_DIR = Path(__file__).resolve().parent
+FROZEN = bool(getattr(sys, "frozen", False))  # running from the optional PyInstaller build
 
 
 def default_root() -> Path:
     env = os.environ.get("TRADER_HOME")
     if env:
         return Path(env).expanduser().resolve()
+    if FROZEN:  # the folder holding the `trader` executable
+        return Path(sys.executable).resolve().parent
     return PACKAGE_DIR.parent
+
+
+def self_command(python: str | None = None) -> list[str]:
+    """The argv prefix that runs this app's CLI: `python -m trader`, or the executable itself when frozen."""
+    return [python or sys.executable] if FROZEN else [python or sys.executable, "-m", "trader"]
 
 
 @dataclass(frozen=True)

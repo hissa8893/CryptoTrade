@@ -48,7 +48,7 @@ def test_wal_and_foreign_keys_enabled(db):
 def test_transaction_rolls_back_completely_on_error(db):
     with pytest.raises(RuntimeError):
         with db.tx() as c:
-            run_id = _run(c)
+            _run(c)
             c.execute(text(
                 "INSERT INTO job_runs (bar_date, started_at, status) VALUES ('2026-01-01', '2026-01-02T00:10:00+00:00', 'running')"
             ))

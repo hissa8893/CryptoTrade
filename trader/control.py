@@ -6,13 +6,12 @@ import json
 import os
 import signal
 import subprocess
-import sys
 import time
 import webbrowser
 from datetime import datetime
 
 from trader.config import AppConfig
-from trader.paths import Paths
+from trader.paths import Paths, self_command
 from trader.timeutil import now_utc
 
 STOPPED_EXIT = 3  # like `systemctl status`: 0 = running, 3 = not running
@@ -67,7 +66,7 @@ def is_trader_process(pid: int) -> bool:
     """Guard against PID reuse: never signal a process that is not our server."""
     cmd = _cmdline(pid)
     if os.name == "nt":
-        return "python" in cmd.lower()
+        return "python" in cmd.lower() or "trader" in cmd.lower()  # tasklist shows only the image name
     return "trader" in cmd and "serve" in cmd
 
 
@@ -169,7 +168,7 @@ def start(cfg: AppConfig, paths: Paths, *, open_browser: bool = True, wait: floa
         kw["creationflags"] = 0x00000008 | 0x00000200 | 0x08000000  # DETACHED | NEW_PROCESS_GROUP | NO_WINDOW
     else:
         kw["start_new_session"] = True  # survives the terminal closing
-    proc = subprocess.Popen([sys.executable, "-m", "trader", "serve"], **kw)
+    proc = subprocess.Popen([*self_command(), "serve"], **kw)
     out.close()
     deadline = time.monotonic() + wait
     while time.monotonic() < deadline:

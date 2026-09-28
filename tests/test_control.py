@@ -5,7 +5,6 @@ import os
 import socket
 import sqlite3
 import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -202,3 +201,43 @@ def test_daemon_processes_days_and_catches_up_after_downtime(inst):
     assert c.execute("SELECT COUNT(DISTINCT run_id) FROM equity_snapshots").fetchone()[0] == 4
     assert list((inst.backups).glob("trader-*.db"))  # daily backup written
     assert sh(inst, "stop.sh")[0] == 0
+
+
+def test_second_serve_exits_zero_so_launchd_and_systemd_never_restart_loop(inst):
+    """launchd KeepAlive{SuccessfulExit:false} / systemd Restart=on-failure restart only on a
+    non-zero exit: a login-time start while the trader already runs must be a quiet success."""
+    assert sh(inst, "start.sh", "--no-browser")[0] == 0
+    pid = daemon_pids(inst)[0]
+    r = subprocess.run([str(REPO / ".venv/bin/python"), "-m", "trader", "serve"], env=env_for(inst),
+                       capture_output=True, text=True, timeout=60, cwd=inst.root)
+    assert r.returncode == 0 and f"already running (PID {pid})" in r.stdout
+    assert daemon_pids(inst) == [pid]
+
+
+def test_uninstall_stops_a_running_trader_and_leaves_no_process(inst):
+    assert sh(inst, "start.sh", "--no-browser")[0] == 0
+    assert len(daemon_pids(inst)) == 1
+    env = env_for(inst, HOME=str(inst.root / "userhome"))  # no real service files touched
+    r = subprocess.run([str(REPO / ".venv/bin/python"), "-m", "trader", "uninstall", "--keep-data"], env=env,
+                       capture_output=True, text=True, timeout=90, cwd=inst.root)
+    assert r.returncode == 0 and "stopped (PID" in r.stdout and "kept" in r.stdout, r.stdout + r.stderr
+    assert daemon_pids(inst) == [] and inst.db_file.exists()
+
+
+def test_stop_during_a_long_catch_up_is_graceful(inst):
+    """Regression: `stop` waited for a whole multi-year catch-up and was force-killed after 30 s.
+    Now it finishes the day in progress and exits; the rest is processed on the next start."""
+    assert sh(inst, "start.sh", "--no-browser")[0] == 0
+    wait_health(inst, lambda h: h["last_ok_day"] == "2020-11-01")
+    assert sh(inst, "stop.sh")[0] == 0
+    later = env_for(inst, fake_now="2023-11-02T00:12:00+00:00")  # ~3 years of missed days
+    assert sh(inst, "start.sh", "--no-browser", env=later)[0] == 0
+    wait_health(inst, lambda h: h["busy"] and h["last_ok_day"] > "2020-11-01")  # mid catch-up
+    t0 = time.time()
+    code, out = sh(inst, "stop.sh", "--timeout", "15", env=later)
+    assert code == 0 and "stopped (PID" in out and "force" not in out, out
+    assert time.time() - t0 < 10 and daemon_pids(inst) == []
+    c = sqlite3.connect(inst.db_file)
+    done = c.execute("SELECT COUNT(*) FROM job_runs WHERE status = 'ok'").fetchone()[0]
+    assert 1 < done < 1000  # stopped part-way, nothing half-written
+    assert c.execute("SELECT COUNT(*) FROM job_runs WHERE status != 'ok'").fetchone()[0] == 0

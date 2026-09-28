@@ -105,12 +105,8 @@ else
 fi
 say ""
 say "Next:"
-if [ -x "$ROOT/start.sh" ]; then
-  say "  1. Start the trader:     ./start.sh        (or double-click start.command on macOS)"
-  say "  2. Open the dashboard:   http://127.0.0.1:8765"
-else
-  say "  The trader and dashboard are not built yet (coming in a later phase). For now you can run:"
-  say "    .venv/bin/trader data status     # see the downloaded price history"
-  say "    .venv/bin/trader doctor          # health check"
-fi
+say "  1. Start the trader:     ./start.sh        (or double-click start.command on macOS)"
+say "  2. Open the dashboard:   http://127.0.0.1:8765"
+say "  3. Optional, start it automatically at every login:   .venv/bin/trader service install"
+say "  Stop: ./stop.sh · Status: ./status.sh · Uninstall: ./uninstall.sh · Guide: README.md"
 exit $doctor_rc

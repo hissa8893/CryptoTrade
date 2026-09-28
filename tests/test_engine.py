@@ -13,7 +13,6 @@ from trader.broker import CostModel
 from trader.config import AppConfig, RiskConfig
 from trader.data import clean_and_validate
 from trader.lookahead import lookahead_proof
-from trader.metrics import drawdown_stats
 from trader.strategies import s1_donchian
 from trader.synthetic import generate
 

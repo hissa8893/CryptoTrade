@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import itertools
 import math
-import random
 from dataclasses import dataclass, field
 from datetime import date as Date
 
@@ -27,7 +26,7 @@ from trader import indicators as ind
 from trader.backtest import eval_start, make_engine
 from trader.broker import CostModel, Trade
 from trader.config import AppConfig
-from trader.metrics import Metrics, compute_metrics, drawdown_stats, red_flags
+from trader.metrics import Metrics, compute_metrics, red_flags
 from trader.strategies import build_strategy
 
 # parameters varied per strategy (the rest stay at their configured values)
@@ -406,7 +405,6 @@ def walk_forward_combined(cfg: AppConfig, frames: dict[str, pd.DataFrame], wfs: 
 
 def run_research(cfg: AppConfig, frames: dict[str, pd.DataFrame], strategies: list[str], symbols: list[str], *,
                  data_source: str, sensitivity_grid: bool = True, progress=None) -> ResearchResult:
-    from trader.backtest import buy_and_hold
 
     say = progress or (lambda msg: None)
     btc = next((frames[s] for s in frames if s.split("/")[0] == cfg.risk.regime_asset), None)

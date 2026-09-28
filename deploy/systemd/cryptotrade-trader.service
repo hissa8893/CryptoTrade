@@ -1,0 +1,17 @@
+[Unit]
+Description=CryptoTrade paper trader (SIMULATION ONLY - never places real orders)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/you/CryptoTrade
+Environment="TRADER_HOME=/home/you/CryptoTrade"
+ExecStart="/home/you/CryptoTrade/.venv/bin/python" -m trader serve
+# restart after a crash, but not after a normal `trader stop` (exit code 0)
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=45
+
+[Install]
+WantedBy=default.target

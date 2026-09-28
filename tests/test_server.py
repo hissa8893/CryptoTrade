@@ -21,7 +21,8 @@ def test_scheduler_jobs_and_health(home):
     with TestClient(application, client=("127.0.0.1", 50000)) as client:
         sched = application.state.scheduler
         jobs = {j.id: j for j in sched.get_jobs()}
-        assert {"daily", "watchdog", "heartbeat"} <= set(jobs)
+        assert {"daily", "watchdog", "heartbeat", "alerts"} <= set(jobs)
+        assert str(jobs["alerts"].trigger) == "interval[0:15:00]"
         daily = jobs["daily"]
         assert str(daily.trigger) == "cron[hour='0', minute='10']" and str(daily.trigger.timezone) == "UTC"
         assert daily.misfire_grace_time == 6 * 3600 and daily.coalesce and daily.max_instances == 1

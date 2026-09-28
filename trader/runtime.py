@@ -120,6 +120,7 @@ class Runtime:
         self._lock = threading.Lock()
         self._failed_at: dict[str, float] = {}
         self.busy = False
+        self.stop_requested = threading.Event()  # set on shutdown: finish the current day, leave the rest
 
     # -- accounts ----------------------------------------------------------------------------
     def accounts(self) -> list[tuple[str, list[str]]]:
@@ -199,22 +200,37 @@ class Runtime:
         return hours
 
     def check_heartbeat(self, running: bool) -> tuple[bool, str]:
-        """For an external scheduler (cron/launchd), independent of the daemon: alert if the daemon
-        is not running or its heartbeat is stale. Returns (healthy, message)."""
+        """For an external scheduler (launchd/systemd/Task Scheduler), independent of the daemon.
+        Urgent alert (at most once a day) only when there has been NO heartbeat for longer than
+        scheduler.heartbeat_stale_hours (26 h) - a deliberate short stop is not an emergency.
+        Returns (healthy, message); healthy = running with a fresh heartbeat."""
         hb = self.db.get_kv("heartbeat")
         hours = (now_utc() - datetime.fromisoformat(hb)).total_seconds() / 3600 if hb else None
         limit = self.cfg.scheduler.heartbeat_stale_hours
         if running and hours is not None and hours <= limit:
-            return True, f"ok: heartbeat {hours * 60:.0f} min ago"
-        why = "not running" if not running else ("never started" if hours is None else f"no heartbeat for {hours:.0f} h")
-        if hours is None or hours > limit or not running:
-            day = now_utc().date().isoformat()
-            with self.db.tx() as c:
-                queue_alert(c, "urgent", f"[trader] trader is {why}",
-                            f"The paper trader is {why} (checked {now_iso()} UTC). Start it with ./start.sh.",
-                            f"watch:{day}:{why.split(' ')[0]}")
+            return True, f"ok: running, heartbeat {hours * 60:.0f} min ago"
+        if hours is None:
+            return False, "never started (no heartbeat yet); no alert"
+        if hours <= limit:
+            return False, f"not running, but last heartbeat only {hours:.1f} h ago (alert after {limit:.0f} h)"
+        why = f"no heartbeat for {hours:.0f} h" + ("" if running else " (trader not running)")
+        with self.db.tx() as c:
+            queue_alert(c, "urgent", f"[trader] {why}",
+                        f"The paper trader has had {why}; last seen {hb[:16].replace('T', ' ')} UTC "
+                        f"(checked {now_iso()} UTC). Start it with ./start.sh.",
+                        f"watch:{now_utc().date().isoformat()}")
+        dispatch_pending(self.cfg, self.secrets, self.db)
+        return False, why + " — urgent alert sent"
+
+    def retry_alerts(self) -> None:
+        """Scheduler job (every 15 min): deliver alerts still pending, or failed in the last 24 h
+        (e.g. the mail server was briefly down at 00:10)."""
+        if self.busy:
+            return  # the running catch-up dispatches when it finishes
+        try:
             dispatch_pending(self.cfg, self.secrets, self.db)
-        return False, why
+        except Exception:
+            log.exception("alert retry failed")
 
     # -- entry points -------------------------------------------------------------------------
     def catch_up_if_due(self) -> list[DayResult]:
@@ -254,6 +270,9 @@ class Runtime:
             frames = self.md.load_all()
             results = []
             for d in days:
+                if self.stop_requested.is_set():
+                    log.info("stop requested: day %s and later left for the next start", d)
+                    break
                 r = self.run_day(d, frames, updates, fetch_error)
                 results.append(r)
                 if r.status != "ok":

@@ -17,7 +17,7 @@ Decisions at t read only data up to and including bar t.
 from __future__ import annotations
 
 import math
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Callable
 
 import numpy as np

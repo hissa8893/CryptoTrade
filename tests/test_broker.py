@@ -56,6 +56,7 @@ def test_gap_through_stop_fills_at_the_open_not_the_stop():
     b.queue(symbol="BTC/USD", strategy="S1", side="buy", qty=1.0, reason="entry", created_date="d0", stop_distance=100)
     b.fill_at_open("d1", {"BTC/USD": 1000.0})
     stop = b.positions[("S1", "BTC/USD")].stop  # ~900.5
+    assert 860.0 < stop  # the whole next bar trades below the stop: a true gap
     fills, trades = b.check_stops("d2", {"BTC/USD": (850.0, 860.0, 840.0, 855.0)})  # opens below the stop
     assert fills[0].raw_px == 850.0 and trades[0].exit_reason == "stop_gap"
     assert trades[0].exit_px == pytest.approx(850 * 0.9995)

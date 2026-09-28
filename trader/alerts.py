@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import logging
 import smtplib
+from datetime import timedelta
 from email.message import EmailMessage
 
 from trader.config import AppConfig, Secrets
-from trader.timeutil import now_iso
+from trader.timeutil import iso, now_iso, now_utc
 
 log = logging.getLogger(__name__)
 
@@ -98,17 +99,37 @@ def queue_alert(c, severity: str, subject: str, body: str, dedupe_key: str) -> N
         {"t": now_iso(), "sev": severity, "s": subject, "b": body, "k": dedupe_key})
 
 
+RETRY_FOR = timedelta(hours=24)  # a failed alert is retried for this long after it was queued...
+RETRY_GAP = timedelta(minutes=10)  # ...at most this often
+
+
 def dispatch_pending(cfg: AppConfig, secrets: Secrets, db) -> dict:
-    """Send every pending alert through the configured channel. Unconfigured channel ->
-    marked 'skipped' (still visible on the dashboard). Never raises."""
+    """Send every pending alert through the configured channel, and retry ones that failed
+    (for 24 h). Unconfigured channel -> 'skipped' (still visible on the dashboard).
+    A round stops at the first delivery failure (the channel is down; don't stall on every
+    alert's timeout). Each alert is claimed atomically first, so two processes dispatching at
+    the same moment never send it twice. Never raises."""
     from sqlalchemy import text
 
     counts = {"sent": 0, "skipped": 0, "failed": 0}
+    now = now_utc()
+    # sent_at doubles as the claim marker while a send is in flight ("<time>#..."); a claim older
+    # than RETRY_GAP was abandoned (process died mid-send) and may be taken over
     with db.read() as c:
-        rows = c.execute(text("SELECT id, severity, subject, body FROM alerts WHERE status = 'pending' ORDER BY id")).fetchall()
+        rows = c.execute(text(
+            "SELECT id, severity, subject, body, status, sent_at FROM alerts "
+            "WHERE (status = 'pending' AND (sent_at IS NULL OR sent_at <= :gap)) "
+            "OR (status = 'failed' AND created_at >= :since AND sent_at <= :gap) ORDER BY id"),
+            {"since": iso(now - RETRY_FOR), "gap": iso(now - RETRY_GAP)}).fetchall()
     configured = (cfg.alerts.channel == "email" and secrets.email_configured()) or \
                  (cfg.alerts.channel == "telegram" and secrets.telegram_configured())
-    for aid, sev, subject, body in rows:
+    for aid, sev, subject, body, old_status, old_sent_at in rows:
+        claim = now_iso() + f"#{aid}:{id(rows)}"  # unique per round; replaced by the real time below
+        with db.tx() as c:
+            won = c.execute(text("UPDATE alerts SET sent_at = :claim WHERE id = :i AND status = :s AND sent_at IS :old"),
+                            {"claim": claim, "i": aid, "s": old_status, "old": old_sent_at}).rowcount == 1
+        if not won:
+            continue  # another process is handling it
         if sev == "info" and not cfg.alerts.daily_summary:
             status, err = "skipped", "daily summary disabled"
         elif not configured:
@@ -119,9 +140,11 @@ def dispatch_pending(cfg: AppConfig, secrets: Secrets, db) -> dict:
                 status, err = "sent", None
             except Exception as exc:  # delivery problems must never break trading
                 status, err = "failed", f"{type(exc).__name__}: {exc}"
-                log.warning("alert %s failed: %s", aid, err)
+                log.warning("alert %s failed (will retry for %d h): %s", aid, RETRY_FOR.total_seconds() // 3600, err)
         counts[status] += 1
         with db.tx() as c:
             c.execute(text("UPDATE alerts SET status = :s, sent_at = :t, error = :e WHERE id = :i"),
                       {"s": status, "t": now_iso(), "e": err, "i": aid})
+        if status == "failed":
+            break  # leave the rest for the next round
     return counts

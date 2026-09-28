@@ -1,10 +1,8 @@
 """Phase 3: S2, S3 (vol sizing + rebalancing), partial-fill accounting, look-ahead for every
 strategy and the combined portfolio, walk-forward integrity, Monte Carlo, regimes."""
 
-import math
 from datetime import date, datetime, timezone
 
-import numpy as np
 import pandas as pd
 import pytest
 
@@ -14,7 +12,7 @@ from trader.config import AppConfig, RiskConfig, S3Config, StrategiesConfig
 from trader.data import clean_and_validate
 from trader.lookahead import lookahead_proof
 from trader.research import (classify_regimes, monte_carlo, param_grid, run_research, walk_forward,
-                             wf_first_date, with_params)
+                             with_params)
 from trader.strategies.base import SymbolData
 from trader.strategies.s2_supertrend import S2Supertrend
 from trader.strategies.s3_momentum import S3Momentum

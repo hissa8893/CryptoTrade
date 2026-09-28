@@ -52,3 +52,19 @@ def test_synthetic_fetch_then_offline_doctor(home):
     assert "✅ Database writable" in d.output
     assert "SYNTHETIC Price history cached" in d.output
     assert d.exit_code == 0, d.output
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+def test_init_tightens_a_loose_env_and_survives_a_read_only_one(home, monkeypatch):
+    assert runner.invoke(app, ["init"]).exit_code == 0
+    home.env_file.chmod(0o644)
+    assert runner.invoke(app, ["init"]).exit_code == 0
+    assert stat.S_IMODE(home.env_file.stat().st_mode) == 0o600  # re-tightened
+    home.env_file.chmod(0o644)
+
+    def refuse(*a, **k):
+        raise PermissionError(30, "Read-only file system")
+
+    monkeypatch.setattr(os, "chmod", refuse)  # like a read-only Docker bind mount
+    r = runner.invoke(app, ["init"])
+    assert r.exit_code == 0 and "could not make .env owner-only" in r.output

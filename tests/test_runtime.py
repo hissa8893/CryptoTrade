@@ -10,9 +10,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 
-import pandas as pd
 import pytest
-from sqlalchemy import text
 from typer.testing import CliRunner
 
 from trader import timeutil
@@ -90,6 +88,24 @@ def test_catch_up_three_missed_days_in_order(live):
     per_account = c.execute("SELECT r.run_key, COUNT(*) FROM equity_snapshots e JOIN runs r ON r.id = e.run_id "
                             "GROUP BY r.run_key").fetchall()
     assert len(per_account) == 4 and all(n == 4 for _, n in per_account)  # one snapshot per day per account
+
+
+def test_stop_during_a_long_catch_up_finishes_the_current_day_and_leaves_the_rest(live):
+    rt = rt_for(live)
+    rt.catch_up("test")
+    at(3)
+    real_run_day = rt.run_day
+
+    def run_day_then_stop(*a, **k):
+        r = real_run_day(*a, **k)
+        rt.stop_requested.set()  # `trader stop` arrives while the first missed day is processing
+        return r
+
+    rt.run_day = run_day_then_stop
+    assert [r.bar_date for r in rt.catch_up("test")] == ["2020-11-02"]
+    assert [d for d, s, _ in job_rows(live)] == ["2020-11-01", "2020-11-02"]
+    rt2 = rt_for(live)  # next start: the rest, in order
+    assert [r.bar_date for r in rt2.catch_up("test")] == ["2020-11-03", "2020-11-04"]
 
 
 def test_running_the_same_day_twice_creates_zero_duplicates(live):

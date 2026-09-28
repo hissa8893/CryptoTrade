@@ -41,7 +41,7 @@
     <div class="tile"><div class="k">Total return</div><div class="v {{ head.total_return|cls }}" data-testid="total-return" data-value="{{ head.total_return }}">{{ head.total_return|arrow }} {{ head.total_return|spct }}</div><div class="b">from {{ head.starting_equity|money0 }}</div></div>
     <div class="tile"><div class="k">Drawdown from peak</div><div class="v {{ 'neg-t' if head.drawdown > 0.0001 else '' }}" data-testid="drawdown" data-value="{{ head.drawdown }}">{{ '−' if head.drawdown > 0.0001 else '' }}{{ head.drawdown|pct }}</div><div class="b">peak {{ head.peak|money0 }}</div></div>
     <div class="tile"><div class="k">Open positions</div><div class="v" data-testid="positions" data-value="{{ head.positions }}">{{ head.positions }}</div><div class="b">max {{ max_positions }}</div></div>
-    <div class="tile"><div class="k">Open risk</div><div class="v" data-testid="open-risk" data-value="{{ head.open_risk_pct }}">{{ head.open_risk_pct|pct }}</div><div class="b">limit {{ heat_limit|pct }}</div></div>
+    <div class="tile"><div class="k">Open risk</div><div class="v" data-testid="open-risk" data-value="{{ head.open_risk_pct }}">{{ head.open_risk_pct|pct }}</div><div class="b">entry limit {{ heat_limit|pct }}</div></div>
   </div>
   {% else %}<div class="empty" style="margin-top:16px">No results yet for {{ acct.label }}.</div>{% endif %}
   </section>

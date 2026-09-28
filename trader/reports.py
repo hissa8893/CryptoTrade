@@ -6,10 +6,8 @@ import html
 import json
 import math
 from collections import Counter
-from dataclasses import asdict
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 from trader.backtest import BacktestResult

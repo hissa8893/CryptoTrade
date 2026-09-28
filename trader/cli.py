@@ -76,8 +76,11 @@ def init() -> None:
     if not paths.env_file.exists():
         shutil.copyfile(paths.env_example, paths.env_file)
         created.append(".env")
-    if os.name != "nt":
-        os.chmod(paths.env_file, 0o600)
+    if os.name != "nt" and paths.env_file.stat().st_mode & 0o077:
+        try:
+            os.chmod(paths.env_file, 0o600)
+        except OSError as exc:  # e.g. a read-only mount in Docker; `doctor` keeps flagging it
+            typer.secho(f"⚠️  could not make .env owner-only ({exc.strerror}); fix: chmod 600 .env", err=True)
     if not paths.shutdown_token_file.exists():
         _write_secret_file(paths.shutdown_token_file, pysecrets.token_urlsafe(32))
         created.append("run/shutdown.token")
@@ -452,9 +455,84 @@ def logs(lines: int = typer.Option(40, "--lines", "-n"), follow: bool = typer.Op
     raise typer.Exit(control.logs(ctx.paths, lines=lines, follow=follow))
 
 
+service_app = typer.Typer(no_args_is_help=True, pretty_exceptions_show_locals=False,
+                          help="Start automatically at login (launchd / systemd / Task Scheduler).")
+app.add_typer(service_app, name="service")
+
+
+@service_app.command("install")
+def service_install() -> None:
+    """Start the trader at every login (and restart it after a crash) + an hourly heartbeat check."""
+    from trader import service
+
+    ctx = _ctx()
+    try:
+        msgs = service.install(service.make_ctx(ctx.paths))
+    except ValueError as exc:
+        typer.secho(f"❌ {exc}", fg="red", err=True)
+        raise typer.Exit(1)
+    for m in msgs:
+        typer.echo(m)
+    raise typer.Exit(1 if any(m.startswith("❌") for m in msgs) else 0)
+
+
+@service_app.command("uninstall")
+def service_uninstall() -> None:
+    """Remove the auto-start service (the trader keeps running until you stop it)."""
+    from trader import service
+
+    ctx = _ctx()
+    for m in service.uninstall(service.make_ctx(ctx.paths)):
+        typer.echo(m)
+
+
+@service_app.command("status")
+def service_status() -> None:
+    """Is the auto-start service installed?"""
+    from trader import service
+
+    ctx = _ctx()
+    ok = service.installed(service.make_ctx(ctx.paths))
+    typer.echo(f"auto-start service ({service.platform_kind()}): {'installed' if ok else 'not installed'}")
+    raise typer.Exit(0 if ok else 3)
+
+
+@app.command("uninstall")
+def uninstall_cmd(
+    delete_data: Optional[bool] = typer.Option(None, "--delete-data/--keep-data",
+                                               help="Delete data/ (trade history, database, price cache) without asking."),
+) -> None:
+    """Stop the trader, remove the auto-start service, and ask before deleting data/.
+    (The uninstall script then removes .venv.)"""
+    from trader import control, service
+
+    paths = get_paths()
+    try:  # uninstalling must work even with a broken config (it trades nothing; only the port is used)
+        cfg = load_config(paths)
+    except ConfigError as exc:
+        typer.secho(f"⚠️  config.yaml unusable ({str(exc)[:80]}); using defaults to stop the trader", err=True)
+        cfg = AppConfig()
+    # remove the auto-start service FIRST, so nothing restarts the trader after we stop it
+    for m in service.uninstall(service.make_ctx(paths)):
+        typer.echo(m)
+    control.stop(cfg, paths)
+    shutil.rmtree(paths.run, ignore_errors=True)  # runtime state only: PID file, lock, private stop token
+    if paths.data.exists():
+        if delete_data is None:
+            delete_data = typer.confirm(
+                f"Delete {paths.data}? It holds your paper-trading history, the database and its backups. "
+                "This cannot be undone", default=False)
+        if delete_data:
+            shutil.rmtree(paths.data)
+            typer.echo(f"deleted {paths.data}")
+        else:
+            typer.echo(f"kept {paths.data} (your trade history). Delete it yourself later if you want.")
+    typer.echo("Also left in place: config.yaml, .env, logs/ and reports/ (delete them yourself if you want).")
+
+
 @app.command("check-heartbeat")
 def check_heartbeat() -> None:
-    """For cron/launchd: send an urgent alert if the trader is not running or its heartbeat is stale."""
+    """Hourly job installed by `service install`: urgent alert (once a day) after 26 h without a heartbeat."""
     from trader.control import running_pid
     from trader.runtime import Runtime
 

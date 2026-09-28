@@ -1,0 +1,9 @@
+[Unit]
+Description=CryptoTrade paper trader heartbeat check (alerts if no heartbeat for 26 h)
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/you/CryptoTrade
+Environment="TRADER_HOME=/home/you/CryptoTrade"
+ExecStart="/home/you/CryptoTrade/.venv/bin/python" -m trader check-heartbeat
+SuccessExitStatus=1

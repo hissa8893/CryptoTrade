@@ -6,13 +6,9 @@ from __future__ import annotations
 import json
 import math
 import re
-import time
-from dataclasses import dataclass
-from datetime import date, datetime, timedelta
-from pathlib import Path
+from datetime import date, datetime
 from types import SimpleNamespace
 
-import numpy as np
 import pandas as pd
 from sqlalchemy import text
 
@@ -24,7 +20,7 @@ from trader.data import MarketData, freshness_problem
 from trader.db import Database
 from trader.metrics import compute_metrics
 from trader.paths import Paths
-from trader.timeutil import last_closed_day, now_utc
+from trader.timeutil import now_utc
 
 ORDER = ["S1", "S2", "S3", "PORTFOLIO"]
 LABELS = {"S1": "S1 Donchian", "S2": "S2 Supertrend", "S3": "S3 Momentum", "PORTFOLIO": "Portfolio (S1+S2+S3)"}
@@ -161,6 +157,13 @@ class Dashboard:
                                              + (f"; {', '.join(paused)}" if paused else "")}
         if paused:
             return {"level": "warn", "text": "Losing-streak pause: " + ", ".join(paused)}
+        # capacity limits: not alarms, but new entries ARE blocked while they hold (say so honestly)
+        head = self.headline(acct)
+        if head and head["positions"] >= self.cfg.risk.max_positions:
+            return {"level": "ok", "text": f"All {self.cfg.risk.max_positions} position slots in use — no new entries"}
+        if head and head["open_risk_pct"] >= self.cfg.risk.max_portfolio_heat:
+            return {"level": "ok", "text": f"Open risk {head['open_risk_pct'] * 100:.2f}% has reached the "
+                                           f"{self.cfg.risk.max_portfolio_heat * 100:.2f}% limit — no new entries"}
         return {"level": "ok", "text": "Normal — entries allowed"}
 
     def regime_bull(self, day: str | None) -> bool | None:

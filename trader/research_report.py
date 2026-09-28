@@ -4,12 +4,9 @@ Monte Carlo drawdowns, regime split, and a scoreboard vs Buy & Hold."""
 from __future__ import annotations
 
 import html
-import json
-import math
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 
 from trader.metrics import Metrics
 from trader.reports import CSS, JS, _cls, _line_chart, _money, _num, _pct
@@ -58,7 +55,7 @@ def _heatmap(s: Sensitivity) -> str:
         for x, v in zip(s.x_values, row):
             is_def = (x, y) == s.default
             if v is None:
-                out.append(f'<td title="invalid combination">—</td>')
+                out.append('<td title="invalid combination">—</td>')
                 continue
             t = min(1.0, abs(v) / vmax)
             bg = _mix(mid, pos if v >= 0 else neg, t)
@@ -67,7 +64,7 @@ def _heatmap(s: Sensitivity) -> str:
                        f'title="{s.x_name}={x}, {s.y_name}={y}: Sharpe {v:.2f}">{v:+.2f}</td>')
         out.append("</tr>")
     out.append("</table>")
-    return ("".join(out) + f'<div class="note">Full-history Sharpe for each parameter pair (in-sample by nature). '
+    return ("".join(out) + '<div class="note">Full-history Sharpe for each parameter pair (in-sample by nature). '
             "Outlined cell = configured default. A robust strategy shows a broad plateau of similar values, "
             "not a single bright cell surrounded by poor ones.</div>")
 

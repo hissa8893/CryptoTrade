@@ -1,0 +1,13 @@
+# never send secrets or local state into a Docker image
+.env
+config.yaml
+data/
+logs/
+run/
+reports/
+.venv/
+.git/
+build/
+dist/
+**/__pycache__/
+.pytest_cache/

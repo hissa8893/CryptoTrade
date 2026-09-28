@@ -22,7 +22,7 @@ from trader.config import load_config
 from trader.paths import Paths
 from trader.runtime import Runtime
 from trader.server import create_app
-from trader.web import money, pct, smoney, spct
+from trader.web import day, money, pct, smoney, spct
 
 from tests.test_alerts import _SMTPHandler
 
@@ -109,6 +109,7 @@ def test_headline_numbers_match_a_direct_db_query(seeded, client, acct):
     assert val(html, "positions") == npos
     assert val(html, "open-risk") == pytest.approx(orisk / e1, abs=1e-12)
     assert money(e1) in html  # and the visible text says the same thing
+    assert f"as of the close of {day(d1)}" in html  # for the latest DB day
 
 
 def test_positions_and_trades_match_db(seeded, client):
@@ -317,12 +318,21 @@ def test_startup_after_downtime_raises_an_urgent_alert(live_home):
     assert "no heartbeat for 40 h" in c.execute("SELECT subject FROM alerts").fetchone()[0]
 
 
-def test_check_heartbeat_command_alerts_when_not_running(live_home):
+def test_check_heartbeat_alerts_only_after_26_hours(live_home):
+    rt = Runtime(load_config(live_home), live_home)
     timeutil.set_now(T0)
     r = CliRunner().invoke(cli, ["check-heartbeat"])
-    assert r.exit_code == 1 and "not running" in r.output
-    c = db(live_home)
-    assert c.execute("SELECT COUNT(*) FROM alerts WHERE subject LIKE '%not running%'").fetchone()[0] == 1
+    assert r.exit_code == 1 and "never started" in r.output
+    rt.heartbeat()
+    timeutil.set_now(T0 + timedelta(hours=3))  # stopped on purpose 3 h ago: not an emergency
+    r = CliRunner().invoke(cli, ["check-heartbeat"])
+    assert r.exit_code == 1 and "only 3.0 h ago" in r.output
+    assert db(live_home).execute("SELECT COUNT(*) FROM alerts").fetchone()[0] == 0
+    timeutil.set_now(T0 + timedelta(hours=30))
+    for _ in range(3):  # hourly checks: one alert per day, not one per hour
+        r = CliRunner().invoke(cli, ["check-heartbeat"])
+        assert r.exit_code == 1 and "no heartbeat for 30 h" in r.output
+    assert db(live_home).execute("SELECT COUNT(*) FROM alerts WHERE subject LIKE '%no heartbeat for 30 h%'").fetchone()[0] == 1
 
 
 @pytest.fixture
@@ -330,3 +340,23 @@ def live_home(home):
     CliRunner().invoke(cli, ["init"])
     home.config_file.write_text(home.config_file.read_text().replace("source: exchange", "source: synthetic"))
     return home
+
+
+def test_capacity_limits_are_reported_as_blocking_new_entries(seeded):
+    """Regression: open risk 4.71% (above the 4% entry limit, which is legal: prices rose after
+    entry) was shown next to 'Normal — entries allowed'."""
+    from trader.dashboard import Dashboard
+
+    paths, cfg, _ = seeded
+    timeutil.set_now(T0 + timedelta(days=DAYS - 1, hours=6))
+    rt = Runtime(cfg, paths)
+    dash = Dashboard(cfg, paths, rt.db, rt.md, rt)
+    acct = dash.account("S1")
+    assert dash.risk_state(acct)["text"] == "Normal — entries allowed"
+    real = dash.headline(acct)
+    dash.headline = lambda a: {**real, "positions": 3, "open_risk_pct": 0.0471}
+    assert dash.risk_state(acct)["text"] == "Open risk 4.71% has reached the 4.00% limit — no new entries"
+    dash.headline = lambda a: {**real, "positions": 4, "open_risk_pct": 0.01}
+    assert dash.risk_state(acct)["text"] == "All 4 position slots in use — no new entries"
+    dash.headline = lambda a: {**real, "positions": 3, "open_risk_pct": 0.0399}
+    assert dash.risk_state(acct)["text"] == "Normal — entries allowed"

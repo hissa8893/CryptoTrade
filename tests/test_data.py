@@ -444,7 +444,6 @@ def test_malformed_new_batch_never_overwrites_good_cache(home):
     md = _md(home, {"bitstamp": fake})
     md.update(now=NOW)
     good = md.cache.load("BTC/USD")
-    orig = fake.candle
     fake.candle = lambda s_, t: [t, 100.0, 90.0, 95.0, 99.0, 1.0]  # high < open: corrupt
     later = NOW + timedelta(days=1)
     fake.now = later

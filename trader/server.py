@@ -88,6 +88,7 @@ def create_app(cfg: AppConfig, paths: Paths, runtime: Runtime, *, start_schedule
                           id="daily", kwargs={"reason": "daily"}, name="daily run")
             sched.add_job(runtime.catch_up_if_due, IntervalTrigger(minutes=5), id="watchdog", name="watchdog")
             sched.add_job(runtime.heartbeat, IntervalTrigger(seconds=60), id="heartbeat", name="heartbeat")
+            sched.add_job(runtime.retry_alerts, IntervalTrigger(minutes=15), id="alerts", name="alert retry")
             sched.add_job(runtime.catch_up, id="startup", kwargs={"reason": "startup"}, name="startup catch-up")
             sched.start()
             log.info("scheduler started; daily run at %02d:%02d UTC", cfg.scheduler.run_hour_utc,
@@ -97,6 +98,7 @@ def create_app(cfg: AppConfig, paths: Paths, runtime: Runtime, *, start_schedule
             yield
         finally:
             log.info("shutting down: waiting for any running job to finish")
+            runtime.stop_requested.set()  # a long catch-up stops after the day in progress
             if sched.running:
                 sched.shutdown(wait=True)
             runtime.db.dispose()
@@ -179,7 +181,9 @@ def serve(cfg: AppConfig, paths: Paths) -> None:
 
     other = running_pid(paths)
     if other and other != os.getpid():
-        raise SystemExit(f"already running (PID {other})")
+        # exit 0: "already running" is success, so launchd/systemd do not restart-loop us
+        print(f"already running (PID {other}); nothing to do")
+        raise SystemExit(0)
     # bind BEFORE starting anything, so a busy port is a clean error (not a half-started daemon)
     sockets = [bind_socket(cfg.server.host, cfg.server.port)]
     if not _is_loopback(cfg.server.host):
