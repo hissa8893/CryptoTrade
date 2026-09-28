@@ -90,9 +90,11 @@ def make_engine(
     costs: CostModel | None = None,
     starting_equity: float | None = None,
     regime_symbol: str | None = None,
+    advisor=None,
 ) -> tuple[Engine, dict[str, pd.DataFrame], str, str]:
     """Build the engine exactly as backtests (and the look-ahead proof) use it.
-    Returns (engine, frames truncated to `end`, eval start, end)."""
+    Returns (engine, frames truncated to `end`, eval start, end).
+    `advisor` (the AI analyst) is passed ONLY by the live paper runtime, never by backtests."""
     costs = costs or CostModel.from_config(cfg.costs)
     strategies = [build_strategy(n, cfg) for n in strategy_names]
     regime_symbol = regime_symbol or next((s for s in frames if s.split("/")[0] == cfg.risk.regime_asset), None)
@@ -109,7 +111,7 @@ def make_engine(
         engine_frames[regime_symbol] = frames[regime_symbol]
     eng = Engine(strategies, engine_frames, costs=costs, risk_cfg=cfg.risk,
                  starting_equity=starting_equity or cfg.accounts.starting_equity,
-                 regime_symbol=regime_symbol, start=start, tradable=set(symbols))
+                 regime_symbol=regime_symbol, start=start, tradable=set(symbols), advisor=advisor)
     return eng, frames, start, end
 
 

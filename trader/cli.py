@@ -530,6 +530,80 @@ def uninstall_cmd(
     typer.echo("Also left in place: config.yaml, .env, logs/ and reports/ (delete them yourself if you want).")
 
 
+llm_app = typer.Typer(no_args_is_help=True, pretty_exceptions_show_locals=False,
+                      help="Optional AI analyst (live paper trading only; can only approve, shrink or veto).")
+app.add_typer(llm_app, name="llm")
+
+
+def _sample_ai_payload(ctx: Ctx) -> dict:
+    """A made-up BTC entry built from the latest cached candles, shaped like a real review."""
+    from trader import indicators as ind
+    from trader.data import MarketData
+    from trader.llm import STRATEGY_RULES, clean
+
+    md = MarketData(ctx.cfg, ctx.paths)
+    btc = next((s for s in md.symbols() if s.startswith(ctx.cfg.risk.regime_asset + "/")), None)
+    df = md.load(btc) if btc else None
+    if df is None or df.empty:
+        raise typer.BadParameter("no cached price data yet; run: " + cli_hint("data fetch"))
+    atr = float(ind.atr(df["high"], df["low"], df["close"], ctx.cfg.risk.atr_period).iloc[-1])
+    px = float(df["close"].iloc[-1])
+    eq = ctx.cfg.accounts.starting_equity
+    dist = ctx.cfg.risk.initial_stop_atr_mult * atr
+    qty = min(eq * ctx.cfg.risk.risk_per_trade / dist, eq * ctx.cfg.risk.max_position_pct / px)
+    tail = df.tail(ctx.cfg.llm.max_bars)
+    rows = [[d.date().isoformat(), r.open, r.high, r.low, r.close, r.volume] for d, r in tail.iterrows()]
+    return clean({
+        "decision_day": rows[-1][0], "symbol": btc, "strategy": "S1", "strategy_rules": STRATEGY_RULES["S1"],
+        "note": "CONNECTION TEST: a made-up proposal; nothing will be traded",
+        "proposal": {"side": "buy", "fills_at": "open of the next day", "qty": qty, "reference_price_close": px,
+                     "stop_price": px - dist, "stop_distance": dist, "position_pct_of_equity": qty * px / eq,
+                     "loss_if_stopped_pct_of_equity": qty * dist / eq},
+        "atr": {"period": ctx.cfg.risk.atr_period, "value": atr},
+        "daily_bars": {"columns": ["date", "open", "high", "low", "close", "volume"], "rows": rows},
+        "portfolio": {"equity": eq, "cash": eq, "open_positions": []},
+    })
+
+
+@llm_app.command("test")
+def llm_test() -> None:
+    """Send ONE sample review (a made-up BTC entry) to check the key, model and cost. Nothing is traded or saved."""
+    from trader.llm import Analyst
+
+    ctx = _ctx()
+    key = ctx.secrets.anthropic_api_key.get_secret_value() if ctx.secrets.anthropic_api_key else None
+    typer.echo(f"asking {ctx.cfg.llm.model} about a made-up BTC entry (timeout {ctx.cfg.llm.timeout_seconds:.0f} s)...")
+    r = Analyst(ctx.cfg.llm, key).review(_sample_ai_payload(ctx))
+    if r.status != "ok":
+        typer.secho(f"❌ no usable answer: {r.fallback_reason} - {r.error or ''}", fg="red")
+        typer.echo("   In live trading this would fall back to the rule-based decision.")
+        raise typer.Exit(1)
+    typer.secho(f"✅ {r.decision} (size x{r.multiplier:.2f}, confidence {r.confidence:.2f})", fg="green")
+    for reason in r.reasons:
+        typer.echo(f"   - {reason}")
+    cost = f"${r.cost_usd:.4f}" if r.cost_usd is not None else "unknown"
+    typer.echo(f"   answered by {r.served_model} in {r.latency_ms / 1000:.1f} s; tokens {r.input_tokens:,} in / "
+               f"{r.output_tokens:,} out; cost {cost}")
+    if not ctx.cfg.llm.enabled:
+        typer.echo("   The analyst is still OFF for trading; set llm.enabled: true in config.yaml, then restart.")
+
+
+@llm_app.command("report")
+def llm_report() -> None:
+    """Is the AI helping? AI-filtered account vs its rules-only shadow twin, verdicts, cost, and what the numbers can tell."""
+    from trader.ai_report import ai_summary, summary_lines
+    from trader.data import MarketData
+    from trader.db import Database
+
+    ctx = _ctx()
+    s = ai_summary(Database(ctx.paths.db_file), MarketData(ctx.cfg, ctx.paths).source)
+    if s is None:
+        typer.echo("The AI analyst has not run yet. Set llm.enabled: true in config.yaml, put ANTHROPIC_API_KEY in .env, "
+                   "check with `" + cli_hint("llm test") + "`, then restart the trader.")
+        raise typer.Exit(0)
+    typer.echo("\n".join(summary_lines(s)))
+
+
 @app.command("check-heartbeat")
 def check_heartbeat() -> None:
     """Hourly job installed by `service install`: urgent alert (once a day) after 26 h without a heartbeat."""

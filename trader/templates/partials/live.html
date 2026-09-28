@@ -22,7 +22,7 @@
 
   <nav class="bar" aria-label="Account and pages">
     <div class="seg" role="group" aria-label="Account">
-      {% for a in accounts %}<a href="/?acct={{ a.name }}&amp;range={{ rng }}" aria-current="{{ 'true' if acct and a.name == acct.name else 'false' }}">{{ 'Portfolio' if a.name == 'PORTFOLIO' else a.name }}</a>{% endfor %}
+      {% for a in accounts %}<a href="/?acct={{ a.name }}&amp;range={{ rng }}" aria-current="{{ 'true' if acct and a.name == acct.name else 'false' }}">{{ a.short }}</a>{% endfor %}
     </div>
     <span class="spacer"></span>
     <a class="iconbtn" href="/research">Research →</a>
@@ -138,6 +138,8 @@
     <div class="muted" style="font-size:12px;margin-top:6px">Sharpe is shown after 20 days. Each strategy is its own $10,000 sub-account; Portfolio runs all three in one account.</div></div>
     {% else %}<div class="empty">The scoreboard fills in after the first daily run.</div>{% endif %}
   </section>
+
+  {% if ai %}{% include "partials/ai.html" %}{% endif %}
 
   <section aria-label="Alerts">
     <h2>Alerts</h2>

@@ -81,7 +81,16 @@ alerts:
   daily_summary: true
 
 llm:
-  enabled: false                # optional analyst layer; can only approve/shrink/veto
-  model: claude-sonnet-5
-  timeout_seconds: 30
-  max_bars: 60
+  # OPTIONAL AI analyst (live paper trading only, never in backtests). It sees each entry the
+  # risk engine approved and may only approve, shrink or veto it. A rules-only "shadow" account
+  # runs beside it so its value is measured, not assumed: see `trader llm report`.
+  # Needs ANTHROPIC_API_KEY in .env; check with `.venv/bin/trader llm test`.
+  enabled: false
+  model: claude-opus-5          # pinned; recorded with every review
+  effort: high                  # low | medium | high | xhigh | max: how hard it thinks (higher = slower, costlier)
+  timeout_seconds: 120          # after this the rule-based decision stands
+  max_retries: 1
+  max_tokens: 16000
+  max_bars: 60                  # daily candles shown per review
+  max_age_days: 7               # catch-up days older than this are decided by the rules alone
+  refusal_fallback: true        # if the model declines, the API re-asks its recommended fallback model

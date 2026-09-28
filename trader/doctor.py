@@ -242,14 +242,30 @@ def check_alerts(cfg: AppConfig, secrets: Secrets, send_test: bool = False) -> C
     return Check("Alert channel", "fail", f"unknown channel {ch}")
 
 
+def check_ai(cfg: AppConfig, secrets: Secrets) -> Check:
+    name = "AI analyst (optional)"
+    if not cfg.llm.enabled:
+        return Check(name, "skip", "off (llm.enabled: false) - trades follow the rules alone")
+    try:
+        importlib.import_module("anthropic")
+    except ImportError:
+        return Check(name, "fail", f"package missing - run: {venv_bin('pip')} install -r requirements-llm.txt "
+                                   "(until then every review falls back to the rules)")
+    if not (secrets.anthropic_api_key and secrets.anthropic_api_key.get_secret_value()):
+        return Check(name, "fail", "ANTHROPIC_API_KEY is empty in .env (every review falls back to the rules)")
+    return Check(name, "ok", f"on, model {cfg.llm.model} pinned, key set; no call made here - try: "
+                             f"{cli_hint('llm test')}")
+
+
 def check_pip_audit(paths: Paths) -> Check:
-    req = paths.root / "requirements.txt"
+    reqs = [p for p in (paths.root / "requirements.txt", paths.root / "requirements-llm.txt") if p.exists()]
     try:
         importlib.import_module("pip_audit")
     except ImportError:
         return Check("pip-audit (dependency CVEs)", "warn", f"pip-audit not installed — run: {venv_bin('pip')} install -r requirements-dev.txt")
     out = subprocess.run(
-        [sys.executable, "-m", "pip_audit", "-r", str(req), "--no-deps", "--disable-pip", "--progress-spinner", "off"],
+        [sys.executable, "-m", "pip_audit", *[a for r in reqs for a in ("-r", str(r))], "--no-deps", "--disable-pip",
+         "--progress-spinner", "off"],
         capture_output=True, text=True, timeout=600,
     )
     lines = [l for l in (out.stdout + out.stderr).splitlines() if l.strip() and not l.startswith("WARNING:")]
@@ -278,6 +294,7 @@ def run_doctor(paths: Paths, *, full: bool = False, send_test_alert: bool = Fals
             checks.append(_safe("Clock synced (±60 s)", lambda: check_clock(cfg)))
         secrets = load_secrets(paths)
         checks.append(_safe("Alert channel", lambda: check_alerts(cfg, secrets, send_test_alert)))
+        checks.append(_safe("AI analyst (optional)", lambda: check_ai(cfg, secrets)))
     if full:
         checks.append(_safe("pip-audit (dependency CVEs)", lambda: check_pip_audit(paths)))
     return checks

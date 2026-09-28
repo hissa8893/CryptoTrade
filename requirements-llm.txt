@@ -1,0 +1,12 @@
+# OPTIONAL: packages for the AI analyst layer (llm.enabled: true in config.yaml).
+# The installer adds these too; the trader runs fine without them (AI reviews then fall
+# back to the rules, and `trader doctor` says why). Pinned; every one has prebuilt wheels
+# for macOS Apple Silicon + Intel, Linux and Windows on Python 3.11-3.14.
+# anyio, certifi, h11, idna, pydantic and typing_extensions come from requirements.txt.
+anthropic==1.8.0
+docstring_parser==0.18.0
+httpcore2==2.13.1
+httpx2==2.13.1
+jiter==0.17.0
+sniffio==1.3.1
+truststore==0.10.4

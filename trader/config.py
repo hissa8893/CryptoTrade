@@ -9,7 +9,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
@@ -185,10 +185,17 @@ class AlertsConfig(_Strict):
 
 
 class LLMConfig(_Strict):
+    """Optional AI analyst (live paper mode only). It can only approve, shrink or veto a trade
+    the risk engine already approved; any failure falls back to the rule-based decision."""
     enabled: bool = False
-    model: str = "claude-sonnet-5"
-    timeout_seconds: float = Field(30, ge=1, le=120)
+    model: str = Field("claude-opus-5", pattern=r"^claude-[a-z0-9.\-]+$")  # pinned; recorded with every review
+    effort: Optional[Literal["low", "medium", "high", "xhigh", "max"]] = "high"  # null = don't send it
+    timeout_seconds: float = Field(120, ge=5, le=600)
+    max_retries: int = Field(1, ge=0, le=3)
+    max_tokens: int = Field(16000, ge=1024, le=64000)
     max_bars: int = Field(60, ge=10, le=250)
+    max_age_days: int = Field(7, ge=0, le=30)  # older catch-up days are decided by the rules alone
+    refusal_fallback: bool = True  # if the model declines, the API retries on its recommended fallback model
 
 
 class AppConfig(_Strict):

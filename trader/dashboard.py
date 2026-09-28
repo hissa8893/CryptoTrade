@@ -22,8 +22,10 @@ from trader.metrics import compute_metrics
 from trader.paths import Paths
 from trader.timeutil import now_utc
 
-ORDER = ["S1", "S2", "S3", "PORTFOLIO"]
-LABELS = {"S1": "S1 Donchian", "S2": "S2 Supertrend", "S3": "S3 Momentum", "PORTFOLIO": "Portfolio (S1+S2+S3)"}
+ORDER = ["S1", "S2", "S3", "PORTFOLIO", "AI", "AI_SHADOW"]
+LABELS = {"S1": "S1 Donchian", "S2": "S2 Supertrend", "S3": "S3 Momentum", "PORTFOLIO": "Portfolio (S1+S2+S3)",
+          "AI": "AI-filtered portfolio", "AI_SHADOW": "Rules-only shadow (AI twin)"}
+SHORT = {"PORTFOLIO": "Portfolio", "AI": "AI", "AI_SHADOW": "Shadow"}
 RANGES = {"7d": 7, "30d": 30, "90d": 90, "all": None}
 EXIT_LABELS = {
     "stop": ("■", "stop hit"), "stop_gap": ("▼", "gapped through stop"), "donchian_exit": ("↘", "channel exit"),
@@ -39,6 +41,18 @@ def _fmt_ind(k: str, v: float) -> str:
     if k.startswith("ret") or k in ("vol", "change", "weight"):
         return f"{name} {v * 100:+.2f}%" if k != "vol" and k != "weight" else f"{name} {v * 100:.1f}%"
     return f"{name} {v:,.6g}"
+
+
+def _ai_step(llm: dict | None) -> dict:
+    if llm is None:
+        return {"title": "AI analyst: not used", "detail": "rules-only account"}
+    if llm.get("status") != "ok":
+        return {"title": "AI analyst: rules decided", "detail": " ".join(llm.get("reasons", []))}
+    m = llm.get("applied_multiplier", llm.get("multiplier"))
+    what = {"approve": "approved", "veto": "vetoed"}.get(llm["decision"], f"reduced to {m:.0%}")
+    conf = f", confidence {llm['confidence']:.2f}" if llm.get("confidence") is not None else ""
+    return {"title": f"AI analyst: {what}",
+            "detail": f"{llm.get('served_model') or llm.get('model')}{conf}: " + " ".join(llm.get("reasons", []))}
 
 
 def _age_hours(ts: str | None) -> float | None:
@@ -66,13 +80,14 @@ class Dashboard:
     def accounts(self) -> list[dict]:
         prefix = f"paper:{self.md.source}:"
         with self.db.read() as c:
-            rows = c.execute(text("SELECT id, run_key, start, starting_equity FROM runs WHERE mode = 'paper' "
+            rows = c.execute(text("SELECT id, run_key, start, starting_equity FROM runs WHERE mode IN ('paper', 'shadow') "
                                   "AND run_key LIKE :p"), {"p": prefix + "%"}).fetchall()
         out = [{"run_id": r[0], "key": r[1], "name": r[1][len(prefix):], "start": r[2], "starting_equity": r[3]}
                for r in rows]
         out.sort(key=lambda a: ORDER.index(a["name"]) if a["name"] in ORDER else 99)
         for a in out:
             a["label"] = LABELS.get(a["name"], a["name"])
+            a["short"] = SHORT.get(a["name"], a["name"])
         return out
 
     def account(self, name: str | None) -> dict | None:
@@ -278,10 +293,8 @@ class Dashboard:
                           + (f" · strength {s[2]:.2f}" if s and s[2] is not None else "")})
             if d:
                 steps.append({"step": "risk", "title": f"Risk check: {d[0]}", "detail": d[1] or ""})
-                llm = json.loads(d[2]) if d[2] else None
-                steps.append({"step": "llm", "title": "LLM analyst",
-                              "detail": (f"{llm.get('decision')} (x{llm.get('size_multiplier')}): "
-                                         + "; ".join(llm.get("reasons", []))) if llm else "not used (rules only)"})
+                if kind == "Entry":  # the analyst only ever sees entries
+                    steps.append({"step": "llm", **_ai_step(json.loads(d[2]) if d[2] else None)})
             if o and o[4] == "filled":
                 steps.append({"step": "fill", "title": f"Filled at the open of {o[0]}",
                               "detail": f"{o[3] or 0:.6g} @ ${o[1]:,.2f} incl. slippage, fee ${o[2]:,.2f}"})

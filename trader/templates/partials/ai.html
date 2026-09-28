@@ -1,0 +1,36 @@
+{# ---------------------------------------------------------------- AI analyst: measured against its rules-only twin #}
+{% set v = ai.verdicts %}{% set fb = ai.fallbacks %}
+<section aria-label="AI analyst">
+  <h2>AI analyst <span class="muted" style="text-transform:none;letter-spacing:0">(is it helping?)</span></h2>
+  <div class="card ai" data-testid="ai-card">
+    <div class="meta">
+      {% if llm_on %}<b>On</b>{% else %}<b>Off</b>: both accounts follow the rules{% endif %}
+      · since {{ ai.start|day }} ({{ ai.days }} days) · {{ ai.calls }} reviews · AI cost {{ ai.cost_usd|money }}
+      · the shadow started the same day with the same money and sees the same signals, but ignores the AI
+      {% if ai.served_models %}· {{ ai.served_models|join(', ') }}{% endif %}
+    </div>
+    <div class="tscroll"><table>
+      <tr><th>Account</th><th>Return</th><th>Max DD</th><th>Trades</th></tr>
+      {% for name, s in [('AI-filtered', ai.ai), ('Rules shadow', ai.shadow)] %}
+      <tr><td>{{ name }}</td>
+        <td class="n {{ s.return|cls }}">{{ s.return|arrow }} {{ s.return|spct }}</td>
+        <td class="n">{{ '−' if s.max_dd > 0.0001 else '' }}{{ s.max_dd|pct }}</td>
+        <td class="n">{{ s.trades }}</td></tr>
+      {% endfor %}
+    </table></div>
+    <div class="line" data-testid="ai-difference" data-value="{{ ai.difference }}">
+      AI minus shadow: <b class="{{ ai.difference|cls }}">{{ ai.difference|arrow }} {{ ai.difference|smoney }}</b>
+      · after AI cost: <b class="{{ ai.net_difference|cls }}">{{ ai.net_difference|smoney }}</b>
+    </div>
+    <div class="line" data-testid="ai-verdicts">
+      Verdicts: {{ v.get('approve', 0) }} approved · {{ v.get('reduce', 0) }} reduced · {{ v.get('veto', 0) }} vetoed
+      {% if fb %}· rules decided alone {{ fb.values()|sum }}× ({% for k, n in fb.items() %}{{ k|replace('_', ' ') }} {{ n }}{{ ', ' if not loop.last }}{% endfor %}){% endif %}
+    </div>
+    {% if ai.vetoed.n %}<div class="line">
+      Vetoed entries the shadow took and has closed: {{ ai.vetoed.closed }}, for
+      <b class="{{ ai.vetoed.shadow_pnl|cls }}">{{ ai.vetoed.shadow_pnl|smoney }}</b>
+      {% if ai.vetoed.closed %}({{ 'losses the vetoes avoided' if ai.vetoed.shadow_pnl < 0 else 'profit the vetoes gave up' }}){% endif %}
+    </div>{% endif %}
+    <p class="aiv {{ ai.level }}" data-testid="ai-verdict">{{ ai.verdict }}</p>
+  </div>
+</section>

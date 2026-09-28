@@ -27,11 +27,12 @@ the rules would have done in the past, measured honestly.
 9. [How the simulation trades](#9-how-the-simulation-trades)
 10. [Market data](#10-market-data)
 11. [Settings](#11-settings)
-12. [Safety and security](#12-safety-and-security)
-13. [Uninstalling](#13-uninstalling)
-14. [Troubleshooting](#14-troubleshooting)
-15. [For developers](#15-for-developers)
-16. [What has and has not been verified](#16-what-has-and-has-not-been-verified)
+12. [The optional AI analyst](#12-the-optional-ai-analyst)
+13. [Safety and security](#13-safety-and-security)
+14. [Uninstalling](#14-uninstalling)
+15. [Troubleshooting](#15-troubleshooting)
+16. [For developers](#16-for-developers)
+17. [What has and has not been verified](#17-what-has-and-has-not-been-verified)
 
 ---
 
@@ -55,7 +56,7 @@ in order, the next time it runs.
 ```
 
 Prefer double-clicking? Use `install.command`, `start.command`, `status.command`,
-`stop.command` in Finder (see [Troubleshooting](#14-troubleshooting) if macOS blocks them).
+`stop.command` in Finder (see [Troubleshooting](#15-troubleshooting) if macOS blocks them).
 
 ---
 
@@ -88,7 +89,7 @@ Do **not** run it with `sudo`: it refuses, because that leaves files you cannot 
 | macOS | `./install.sh` or double-click `install.command` | the supported target |
 | Linux | `./install.sh` | tested (the whole test suite runs on Linux) |
 | Windows | double-click `install.bat` (runs `install.ps1`), then the `.bat` scripts | written but **never run on Windows** |
-| No Python | optional self-contained build, see [15](#optional-self-contained-build-pyinstaller) | works on Linux; **unsigned**, see notes |
+| No Python | optional self-contained build, see [16](#optional-self-contained-build-pyinstaller) | works on Linux; **unsigned**, see notes |
 
 > **The `trader` command.** It lives inside the project, so type `.venv/bin/trader …` from the
 > project folder (or `.venv\Scripts\trader …` on Windows). The start/stop/status scripts do
@@ -169,6 +170,8 @@ seconds and works on a phone-sized screen.
   check, the (optional) AI review, and the fill, for both entry and exit.
 * **Risk events** in plain English (newest first), the **strategy scoreboard**, and whether
   **alerts** are being delivered.
+* **AI analyst** (only once it has been switched on, section 12): the AI-filtered account against
+  its rules-only twin, the verdicts, what the AI has cost, and whether the difference means anything yet.
 * **Research** (top right) lists every backtest and research report.
 
 Gains are **blue with ▲ and "+"**; losses are **vermillion with ▼ and "−"**. These colours
@@ -369,7 +372,59 @@ common way to fool yourself (section 8).
 
 ---
 
-## 12. Safety and security
+## 12. The optional AI analyst
+
+It is **off by default**. When it is on, an AI model reviews each **new entry that the risk engine
+has already approved**, and may only **approve** it, **make it smaller**, or **veto** it.
+
+It cannot create a trade, make one bigger, move a stop or touch an exit. The software enforces this,
+not the prompt. If anything goes wrong (no key, timeout, API error, the model declining, or an
+answer that is malformed or out of range), the rule-based decision stands, and the dashboard says so.
+
+**It is measured, not trusted.** Switching it on creates two new accounts on the same day:
+* **AI**: the AI-filtered portfolio.
+* **Shadow**: the same strategies, the same money and the same signals, but rules only.
+
+The dashboard's **AI analyst** card and `.venv/bin/trader llm report` compare the two, including
+what the AI has cost, and say honestly whether the difference means anything yet. For a daily
+system, expect "no evidence either way" for a long time: [docs/AI_SELF_IMPROVEMENT.md](docs/AI_SELF_IMPROVEMENT.md)
+explains why, and what else AI could do here.
+
+**To switch it on:**
+1. Create an API key in the Claude Console (<https://console.anthropic.com>) and put
+   `ANTHROPIC_API_KEY=...` in `.env`.
+2. Run `.venv/bin/trader llm test`. It sends one sample review (a made-up BTC entry) and shows the
+   answer, how long it took and what it cost. Nothing is traded.
+3. Set `llm.enabled: true` in `config.yaml`, then run `./restart.sh`.
+
+**Cost:** a review happens only when an entry passes every risk check. That is at most one per
+strategy per coin per day, and usually far fewer. `trader llm test` shows the real cost of one
+review, and the dashboard keeps the running total.
+
+**Settings** (`llm:` in `config.yaml`, each explained there):
+* the model (pinned, and recorded with every review);
+* how hard it thinks (`effort`);
+* the timeout;
+* how old a catch-up day may be and still get a review (`max_age_days`; older days follow the
+  rules);
+* whether a declined request may be retried on the API's recommended fallback model.
+
+Note that a `config.yaml` created before this version keeps the model it already names.
+
+**What is sent:**
+* recent daily prices;
+* indicator values;
+* your *paper* positions and risk state.
+
+No personal data and no keys are sent. The exact request and the answer for every review are
+stored locally in `data/trader.db`.
+
+**Never in backtests:** a model may remember what prices did after any day it was trained on, so a
+backtest with it in the loop would be meaningless. It is only judged going forward.
+
+---
+
+## 13. Safety and security
 
 * **Simulation only.** It uses public market-data endpoints only. The data layer refuses to
   hold any credentials, and every entry point checks `mode == "paper"` and refuses to run
@@ -379,12 +434,14 @@ common way to fool yourself (section 8).
   read-only and has a strict Content-Security-Policy. It loads nothing from other sites.
 * **Secrets** live only in `.env` (owner-only permissions, git-ignored) and are scrubbed from
   logs and error messages. `trader stop` uses a private token in `run/`.
+* **The optional AI analyst** can only keep, shrink or veto an approved entry, and this is enforced
+  in code. Its key lives only in `.env`, and any failure falls back to the rules (section 12).
 * **Dependencies** are pinned. `.venv/bin/pip install -r requirements-dev.txt`, then
   `.venv/bin/trader doctor --full` checks them for known vulnerabilities (pip-audit).
 
 ---
 
-## 13. Uninstalling
+## 14. Uninstalling
 
 ```bash
 ./uninstall.sh        # or double-click uninstall.command  (Windows: uninstall.bat, untested)
@@ -397,7 +454,7 @@ paper-trading history and its backups), and removes `.venv/`. It leaves `config.
 
 ---
 
-## 14. Troubleshooting
+## 15. Troubleshooting
 
 | Problem | Fix |
 |---|---|
@@ -412,7 +469,7 @@ paper-trading history and its backups), and removes `.venv/`. It leaves `config.
 
 ---
 
-## 15. For developers
+## 16. For developers
 
 ```bash
 .venv/bin/pip install -r requirements-dev.txt
@@ -454,7 +511,7 @@ See [`deploy/Dockerfile`](deploy/Dockerfile). It is **untested** (no Docker was 
 
 ---
 
-## 16. What has and has not been verified
+## 17. What has and has not been verified
 
 Verified here, on Linux, by the test suite and end-to-end runs:
 * installing from scratch;
@@ -465,7 +522,9 @@ Verified here, on Linux, by the test suite and end-to-end runs:
 * the alert queue with a local mail server;
 * the systemd service files (`systemd-analyze verify`);
 * uninstall;
-* the PyInstaller build.
+* the PyInstaller build;
+* the AI analyst, against a local stand-in for the Anthropic API. This goes through the real SDK over
+  HTTP and covers answers, vetoes, reductions, timeouts, errors, refusals and bad output.
 
 **Not verified** (it was not possible where this was built):
 * a real Mac (launchd agents and `.command` files);
@@ -473,7 +532,8 @@ Verified here, on Linux, by the test suite and end-to-end runs:
 * Docker;
 * downloading real Bitstamp/Coinbase data (the network blocked exchanges, so every test used
   clearly labelled **synthetic** prices);
-* sending through a real email provider.
+* sending through a real email provider;
+* a real AI review (there is no API key here). Run `.venv/bin/trader llm test` once on your Mac.
 
 The first `./install.sh` on your Mac is the real test of these. Its `doctor` checklist
 reports anything that does not work.
@@ -486,4 +546,4 @@ reports anything that does not work.
 | 4 | Always-on runtime, catch-up, crash recovery, start/stop scripts | ✅ |
 | 5 | Dashboard and email alerts | ✅ |
 | 6 | Hardening, auto-start service, uninstall, packaging, this guide | ✅ |
-| 7 | Optional AI analyst layer (can only approve, shrink or veto a trade) | not started |
+| 7 | Optional AI analyst with a rules-only shadow twin, plus the [self-improvement research note](docs/AI_SELF_IMPROVEMENT.md) | ✅ |

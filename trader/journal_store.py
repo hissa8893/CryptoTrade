@@ -37,9 +37,10 @@ def write_journal(c: Connection, run_id: int, run_key: str, j: Journal, created:
     dec_ids: dict[int, int] = {}
     for d in j.decisions:
         r = c.execute(text(
-            "INSERT INTO decisions (signal_id, ref, risk_result, risk_reason, final_action, final_qty, created_at) "
-            "VALUES (:s, :ref, :rr, :why, :a, :q, :c)"),
+            "INSERT INTO decisions (signal_id, ref, risk_result, risk_reason, llm_json, final_action, final_qty, "
+            "created_at) VALUES (:s, :ref, :rr, :why, :llm, :a, :q, :c)"),
             {"s": signal_id(d["signal_ref"]), "ref": d["ref"], "rr": d["risk_result"], "why": d["risk_reason"],
+             "llm": json.dumps(d["llm"]) if d.get("llm") is not None else None,
              "a": d["final_action"], "q": d["final_qty"], "c": created})
         dec_ids[d["ref"]] = r.lastrowid
 

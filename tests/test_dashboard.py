@@ -136,7 +136,7 @@ def test_every_trade_has_a_full_decision_trail(seeded, client):
     for block in re.findall(r"<details data-trade=.*?</details>", html, re.S):
         assert "Entry signal at the close of" in block
         assert "Risk check: pass" in block or "Risk check: shrunk" in block
-        assert "LLM analyst" in block
+        assert "AI analyst: not used" in block  # rules-only account
         assert "Filled at the open of" in block
         assert ("Exit signal at the close of" in block) or ("Stop filled on" in block)
 

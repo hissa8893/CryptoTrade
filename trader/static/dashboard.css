@@ -109,3 +109,8 @@ footer{margin-top:var(--s6);color:var(--muted);font-size:12px;border-top:1px sol
 form.login{display:grid;gap:var(--s3);max-width:360px;margin-top:var(--s5)}
 form.login input{min-height:var(--tap);padding:0 var(--s3);font:inherit;background:var(--surface);color:var(--ink);border:1px solid var(--line);border-radius:var(--radius)}
 form.login button{min-height:var(--tap);font:inherit;font-weight:600;background:var(--pos);color:var(--surface);border:0;border-radius:var(--radius)}
+/* AI analyst card */
+.card.ai{font-size:14px}.card.ai .meta{color:var(--muted);margin-bottom:var(--s2)}
+.card.ai .line{margin-top:var(--s2)}
+.aiv{margin:var(--s3) 0 0;padding:var(--s2) var(--s3);border-left:3px solid var(--line);background:var(--wash)}
+.aiv.ok{border-left-color:var(--pos)}.aiv.bad{border-left-color:var(--neg)}

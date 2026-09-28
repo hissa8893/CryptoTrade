@@ -9,8 +9,8 @@
 FROM python:3.12-slim
 WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 TRADER_HOME=/app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt requirements-llm.txt ./
+RUN pip install --no-cache-dir -r requirements.txt -r requirements-llm.txt
 COPY . .
 RUN pip install --no-cache-dir --no-deps -e . && useradd --create-home trader && chown -R trader /app
 USER trader

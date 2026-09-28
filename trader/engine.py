@@ -26,6 +26,7 @@ import pandas as pd
 from trader import indicators as ind
 from trader.broker import CostModel, Fill, Order, SimBroker, Trade
 from trader.config import RiskConfig
+from trader.llm import STRATEGY_RULES, ReviewRequest, clean
 from trader.risk import RiskEvent, RiskManager
 from trader.strategies.base import Strategy, SymbolData
 
@@ -69,6 +70,7 @@ class Engine:
         regime_symbol: str | None,
         start: str | None = None,
         tradable: set[str] | None = None,
+        advisor=None,
     ):
         if not strategies:
             raise ValueError("need at least one strategy")
@@ -95,6 +97,9 @@ class Engine:
         self.broker = SimBroker(cash=starting_equity, costs=costs)
         self.risk = RiskManager(risk_cfg, starting_equity)
         self.journal = Journal()
+        # optional AI analyst (live paper trading only; never passed by backtests). It is asked only
+        # about entries the risk engine approved, and its answer can only keep or shrink them.
+        self.advisor = advisor
         self.last_date: str | None = None
         self.last_close: dict[str, float] = {}
         self._sig_ref = 1
@@ -133,12 +138,57 @@ class Engine:
         return ref
 
     def _decision(self, d: str, signal_ref: int, result: str, reason: str, action: str, qty: float | None,
-                  check: str) -> int:
+                  check: str, llm: dict | None = None) -> int:
         ref = self._dec_ref
         self._dec_ref += 1
-        self.journal.decisions.append({"ref": ref, "signal_ref": signal_ref, "bar_date": d, "risk_result": result,
-                                       "risk_reason": reason, "final_action": action, "final_qty": qty, "check": check})
+        rec = {"ref": ref, "signal_ref": signal_ref, "bar_date": d, "risk_result": result, "risk_reason": reason,
+               "final_action": action, "final_qty": qty, "check": check}
+        if llm is not None:
+            rec["llm"] = llm
+        self.journal.decisions.append(rec)
         return ref
+
+    def _review_request(self, d: str, sym: str, sname: str, i: int, sig, dec, price: float, equity: float,
+                        regime: bool | None, open_risk: float) -> ReviewRequest:
+        """What the AI analyst sees: data up to the close of day d only."""
+        sd, b, s = self.sd[sym], self.broker, self.risk.state
+        lo = max(0, i - self.advisor.max_bars + 1)
+        vol = sd.volume
+        rows = [[sd.dates[k], sd.open[k], sd.high[k], sd.low[k], sd.close[k], None if vol is None else vol[k]]
+                for k in range(lo, i + 1)]
+        atr = float(self.risk_atr[sym][i])
+        positions = [{"symbol": p.symbol, "strategy": p.strategy, "qty": p.qty, "entry_date": p.entry_date,
+                      "entry_price": p.entry_px, "last_close": self.last_close.get(p.symbol), "stop": p.stop,
+                      "unrealized_pnl": (self.last_close.get(p.symbol, p.entry_px) - p.entry_px) * p.qty,
+                      "value_pct_of_equity": self.last_close.get(p.symbol, p.entry_px) * p.qty / equity}
+                     for p in b.positions.values()]
+        payload = {
+            "decision_day": d, "symbol": sym, "strategy": sname,
+            "strategy_rules": STRATEGY_RULES.get(sname, ""), "strategy_parameters": self.strategies[sname].params(),
+            "signal": {"strength": sig.strength, "indicators": sig.indicators},
+            "proposal": {
+                "side": "buy", "fills_at": "open of the next day", "qty": dec.qty, "reference_price_close": price,
+                "stop_price": price - dec.stop_distance, "stop_distance": dec.stop_distance,
+                "stop_distance_in_atr": dec.stop_distance / atr if atr > 0 else None,
+                "position_value": dec.qty * price, "position_pct_of_equity": dec.qty * price / equity,
+                "loss_if_stopped": dec.qty * dec.stop_distance,
+                "loss_if_stopped_pct_of_equity": dec.qty * dec.stop_distance / equity,
+                "risk_engine_result": dec.result, "risk_engine_note": dec.reason,
+            },
+            "atr": {"period": self.risk_cfg.atr_period, "value": atr},
+            "daily_bars": {"columns": ["date", "open", "high", "low", "close", "volume"], "rows": rows},
+            "portfolio": {
+                "equity": equity, "cash": b.cash, "open_positions": positions,
+                "open_risk_pct_of_equity": open_risk / equity if equity > 0 else None,
+                "max_positions": self.risk_cfg.max_positions, "max_open_risk_pct": self.risk_cfg.max_portfolio_heat,
+            },
+            "risk_state": {
+                "btc_above_its_200_day_average": regime, "peak_equity": s.peak_equity,
+                "drawdown_from_peak": 1 - equity / s.peak_equity if s.peak_equity > 0 else 0.0,
+                "circuit_breaker_on": s.breaker_active, "losing_streak_for_this_strategy": s.streaks.get(sname, 0),
+            },
+        }
+        return ReviewRequest(d, sym, sname, payload=clean(payload))
 
     def _event(self, e: RiskEvent) -> None:
         self.journal.events.append(e)
@@ -286,8 +336,30 @@ class Engine:
                 strategy_cap_qty=(w * equity / price) if w is not None else None,
             )
             sref = self._signal(d, sym, sname, "enter", sig.strength, sig.indicators)
+            qty, llm = dec.qty, None
+            if self.advisor is not None and dec.result != "blocked":
+                rv = self.advisor.review(self._review_request(d, sym, sname, i, sig, dec, price, equity, regime,
+                                                              open_risk_now + added_risk))
+                m = float(rv.multiplier) if math.isfinite(rv.multiplier) else 1.0
+                m = min(1.0, max(0.0, m))  # HARD LIMIT: the AI can only keep or shrink an approved entry
+                llm = {**rv.to_json(), "applied_multiplier": m}
+                qty = dec.qty * m
+                detail = {"signal_ref": sref, "ai": {k: llm[k] for k in ("decision", "multiplier", "status",
+                                                                         "fallback_reason", "model", "prompt_hash")}}
+                if rv.is_failure:
+                    self._event(RiskEvent(d, "ai_fallback", "warn",
+                                          f"{sname} {sym}: AI review unavailable ({rv.fallback_reason}); "
+                                          "the rule-based decision stands.", sym, sname, detail))
+                if m <= 0:
+                    self._decision(d, sref, dec.result, dec.reason, "none", None, dec.check, llm)
+                    self._event(RiskEvent(d, "ai_veto", "info", f"{sname} {sym} entry vetoed by the AI analyst: "
+                                          + " ".join(rv.reasons), sym, sname, detail))
+                    continue
+                if m < 1:
+                    self._event(RiskEvent(d, "ai_reduce", "info", f"{sname} {sym} entry reduced to {m:.0%} by the "
+                                          "AI analyst: " + " ".join(rv.reasons), sym, sname, detail))
             action = "buy" if dec.result != "blocked" else "none"
-            dref = self._decision(d, sref, dec.result, dec.reason, action, dec.qty or None, dec.check)
+            dref = self._decision(d, sref, dec.result, dec.reason, action, qty or None, dec.check, llm)
             if dec.result == "blocked":
                 self._event(RiskEvent(d, f"entry_blocked_{dec.check}", "info", f"{sname} {sym} entry blocked: {dec.reason}",
                                       sym, sname, {"signal_ref": sref, "sizing": dec.sizing}))
@@ -295,10 +367,10 @@ class Engine:
             if dec.result == "shrunk":
                 self._event(RiskEvent(d, "entry_shrunk", "info", f"{sname} {sym} entry shrunk: {dec.reason}",
                                       sym, sname, {"signal_ref": sref, "sizing": dec.sizing}))
-            b.queue(symbol=sym, strategy=sname, side="buy", qty=dec.qty, reason="entry", created_date=d,
+            b.queue(symbol=sym, strategy=sname, side="buy", qty=qty, reason="entry", created_date=d,
                     stop_distance=dec.stop_distance, signal_ref=sref, decision_ref=dref)
-            reserved_cash += dec.qty * unit_cost
-            added_risk += dec.qty * dec.stop_distance
+            reserved_cash += qty * unit_cost
+            added_risk += qty * dec.stop_distance
             accepted += 1
 
         # 8. snapshot

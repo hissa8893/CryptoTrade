@@ -38,6 +38,7 @@ from trader.config import AppConfig, Secrets, load_secrets
 from trader.data import MarketData
 from trader.db import Database, git_commit
 from trader.journal_store import save_engine_state, write_journal, write_positions
+from trader.llm import Analyst, Review, ReviewBook
 from trader.paths import Paths
 from trader.strategies import AVAILABLE
 from trader.timeutil import last_closed_day, now_iso, now_utc
@@ -91,6 +92,21 @@ class FileLock:
             self._fh = None
 
 
+@dataclass(frozen=True)
+class Account:
+    key: str
+    strategies: tuple[str, ...]
+    mode: str = "paper"  # 'shadow' = the rules-only twin of the AI-filtered account
+    ai: bool = False  # True = entries go past the AI analyst
+
+    def __iter__(self):  # `for key, strategies in accounts()` keeps working
+        return iter((self.key, list(self.strategies)))
+
+
+class _Stopping(Exception):
+    pass
+
+
 @dataclass
 class DayResult:
     bar_date: str
@@ -123,25 +139,39 @@ class Runtime:
         self.stop_requested = threading.Event()  # set on shutdown: finish the current day, leave the rest
 
     # -- accounts ----------------------------------------------------------------------------
-    def accounts(self) -> list[tuple[str, list[str]]]:
-        enabled = [s for s in AVAILABLE if getattr(self.cfg.strategies, s.lower()).enabled]
+    def accounts(self) -> list[Account]:
+        """S1/S2/S3 each alone, the combined PORTFOLIO, and - once the AI analyst has been switched
+        on - an AI-filtered portfolio plus its rules-only SHADOW twin. The twin starts the same day
+        with the same money and sees the same signals, so any difference between the two is the AI's
+        doing. Once started, the pair keeps running (rules-only reviews while the AI is off), so the
+        comparison never has gaps."""
+        enabled = tuple(s for s in AVAILABLE if getattr(self.cfg.strategies, s.lower()).enabled)
         src = self.md.source
-        accts = [(f"paper:{src}:{s}", [s]) for s in enabled]
+        accts = [Account(f"paper:{src}:{s}", (s,)) for s in enabled]
         if len(enabled) > 1:
-            accts.append((f"paper:{src}:PORTFOLIO", enabled))
+            accts.append(Account(f"paper:{src}:PORTFOLIO", enabled))
+        if enabled and (self.cfg.llm.enabled or self._ai_started(src)):
+            accts.append(Account(f"paper:{src}:AI", enabled, "paper", ai=True))
+            accts.append(Account(f"paper:{src}:AI_SHADOW", enabled, "shadow"))
         return accts
+
+    def _ai_started(self, src: str) -> bool:
+        with self.db.read() as c:
+            return c.execute(text("SELECT 1 FROM runs WHERE run_key = :k"), {"k": f"paper:{src}:AI"}).first() is not None
 
     def _ensure_runs(self, c, first_day: str) -> dict[str, tuple[int, str]]:
         out = {}
-        for key, strategies in self.accounts():
+        for acct in self.accounts():
+            key, strategies = acct.key, list(acct.strategies)
             row = c.execute(text("SELECT id, start FROM runs WHERE run_key = :k"), {"k": key}).fetchone()
             if row is None:
                 params = {"strategies": {s: getattr(self.cfg.strategies, s.lower()).model_dump() for s in strategies},
                           "risk": self.cfg.risk.model_dump(), "costs": self.cfg.costs.model_dump()}
                 c.execute(text(
                     "INSERT INTO runs (run_key, mode, strategy, params_json, start, created_at, git_commit, app_version, "
-                    "starting_equity, data_source) VALUES (:k, 'paper', :s, :p, :st, :c, :g, :v, :eq, :src)"),
-                    {"k": key, "s": "PORTFOLIO" if len(strategies) > 1 else strategies[0], "p": json.dumps(params),
+                    "starting_equity, data_source) VALUES (:k, :m, :s, :p, :st, :c, :g, :v, :eq, :src)"),
+                    {"k": key, "m": acct.mode, "s": "PORTFOLIO" if len(strategies) > 1 else strategies[0],
+                     "p": json.dumps({**params, "ai": acct.ai}),
                      "st": first_day, "c": now_iso(), "g": git_commit(self.paths.root), "v": __version__,
                      "eq": self.cfg.accounts.starting_equity, "src": self.md.source})
                 row = c.execute(text("SELECT id, start FROM runs WHERE run_key = :k"), {"k": key}).fetchone()
@@ -298,6 +328,100 @@ class Runtime:
             flock.release()
             self._lock.release()
 
+    # -- AI analyst -------------------------------------------------------------------------------
+    def _engine(self, acct: Account, frames: dict, tradable: list[str], d: str, start: str, state: dict | None,
+                advisor=None):
+        engine_frames = {s: df.loc[:d] for s, df in frames.items() if s in tradable}
+        eng, *_ = make_engine(self.cfg, engine_frames, list(acct.strategies), symbols=tradable, start=start,
+                              advisor=advisor)
+        if state:
+            eng.load_state(state)
+        return eng
+
+    def _ai_policy(self, d: str) -> str | None:
+        """Why the rules decide alone today (no AI call), or None when the AI is asked."""
+        if not self.cfg.llm.enabled:
+            return "disabled"
+        if (last_closed_day() - date.fromisoformat(d)).days > self.cfg.llm.max_age_days:
+            return "too_old"  # a long catch-up is decided by the rules (cost, and the model may know later prices)
+        return None
+
+    def _review_book(self, acct: Account, d: str, stored: dict[str, Review], collect: bool = False) -> ReviewBook:
+        return ReviewBook(acct.key, stored, model=self.cfg.llm.model, max_bars=self.cfg.llm.max_bars,
+                          synthetic=self.md.source == "synthetic", collect=collect, policy=self._ai_policy(d))
+
+    @staticmethod
+    def _stored_reviews(c, key: str, d: str) -> dict[str, Review]:
+        rows = c.execute(text(
+            "SELECT prompt_hash, decision, size_multiplier, confidence, reasons_json, status, fallback_reason, model, "
+            "served_model, prompt_version, cost_usd, latency_ms, input_tokens, output_tokens FROM ai_reviews "
+            "WHERE run_key = :k AND bar_date = :d"), {"k": key, "d": d}).fetchall()
+        return {r[0]: Review(decision=r[1], multiplier=r[2], confidence=r[3], reasons=json.loads(r[4]), status=r[5],
+                             fallback_reason=r[6], model=r[7], served_model=r[8], prompt_hash=r[0],
+                             prompt_version=r[9], cost_usd=r[10], latency_ms=r[11], input_tokens=r[12],
+                             output_tokens=r[13]) for r in rows}
+
+    def prepare_ai_reviews(self, d: str, frames: dict, tradable: list[str]) -> int:
+        """Before day d's transaction: run each AI account's engine for d WITHOUT saving anything, note
+        every entry the risk engine approves, ask the analyst about each one (once - verdicts are
+        stored), and repeat until nothing new comes up (a veto can free room for another signal).
+        Returns the number of new reviews fetched."""
+        accts = [a for a in self.accounts() if a.ai]
+        if not accts or self._ai_policy(d):
+            return 0
+        analyst = Analyst(self.cfg.llm, self.secrets.anthropic_api_key.get_secret_value()
+                          if self.secrets.anthropic_api_key else None)
+        fetched = 0
+        for acct in accts:
+            with self.db.read() as c:
+                row = c.execute(text("SELECT r.start, s.state_json FROM runs r LEFT JOIN run_state s ON s.run_id = r.id "
+                                     "WHERE r.run_key = :k"), {"k": acct.key}).fetchone()
+            start, state = (row[0], json.loads(row[1]) if row[1] else None) if row else (d, None)
+            if state and state["last_date"] and state["last_date"] >= d:
+                continue
+            for _ in range(100):  # one new review per round; a day has at most (strategies x coins) entries
+                with self.db.read() as c:
+                    book = self._review_book(acct, d, self._stored_reviews(c, acct.key, d), collect=True)
+                self._engine(acct, frames, tradable, d, start, state, book).run(until=d)
+                if not book.missing:
+                    break
+                for ph, req in book.missing.items():
+                    if self.stop_requested.is_set():
+                        raise _Stopping()
+                    rv = analyst.review(req.payload)
+                    if rv.prompt_hash != ph:
+                        raise RuntimeError("AI review prompt hash mismatch (payload not deterministic)")
+                    self._store_review(acct.key, req, rv)
+                    fetched += 1
+                    log.info("AI review %s %s %s: %s x%.2f (%s)", d, req.strategy, req.symbol, rv.decision,
+                             rv.multiplier, rv.status if rv.status == "ok" else rv.fallback_reason)
+            else:
+                log.error("AI reviews for %s did not settle after 100 rounds; unreviewed entries follow the rules", d)
+        return fetched
+
+    def _store_review(self, key: str, req, rv: Review) -> None:
+        with self.db.tx() as c:
+            c.execute(text(
+                "INSERT INTO ai_reviews (run_key, bar_date, strategy, symbol, prompt_hash, prompt_version, model, "
+                "served_model, status, fallback_reason, decision, size_multiplier, confidence, reasons_json, "
+                "request_json, response_text, error, input_tokens, output_tokens, latency_ms, cost_usd, created_at) "
+                "VALUES (:k, :d, :st, :sym, :ph, :pv, :m, :sm, :status, :fr, :dec, :mult, :conf, :reasons, :req, "
+                ":resp, :err, :tin, :tout, :lat, :cost, :c) ON CONFLICT (run_key, prompt_hash) DO NOTHING"),
+                {"k": key, "d": req.date, "st": req.strategy, "sym": req.symbol, "ph": rv.prompt_hash,
+                 "pv": rv.prompt_version, "m": rv.model, "sm": rv.served_model, "status": rv.status,
+                 "fr": rv.fallback_reason, "dec": rv.decision, "mult": rv.multiplier, "conf": rv.confidence,
+                 "reasons": json.dumps(rv.reasons), "req": json.dumps(req.payload, sort_keys=True),
+                 "resp": rv.response_text, "err": rv.error, "tin": rv.input_tokens, "tout": rv.output_tokens,
+                 "lat": rv.latency_ms, "cost": rv.cost_usd, "c": now_iso()})
+
+    def _defer(self, d: str, why: str) -> DayResult:
+        """Stopped part-way through preparing day d: nothing was traded; it runs again on the next start."""
+        with self.db.tx() as c:
+            c.execute(text("UPDATE job_runs SET status = 'failed', finished_at = :t, error = :e WHERE bar_date = :d"),
+                      {"t": now_iso(), "e": f"deferred: {why}; will be re-processed", "d": d})
+        log.info("day %s deferred: %s", d, why)
+        return DayResult(d, "deferred", why)
+
     # -- crash recovery -------------------------------------------------------------------------
     def recover(self) -> dict:
         """Run before anything else: find days interrupted mid-run and make sure the positions
@@ -318,7 +442,7 @@ class Runtime:
                 log.warning("day %s was interrupted mid-run; will re-process", d)
             rows = c.execute(text(
                 "SELECT r.id, r.run_key, s.state_json FROM runs r JOIN run_state s ON s.run_id = r.id "
-                "WHERE r.mode = 'paper'")).fetchall()
+                "WHERE r.mode IN ('paper', 'shadow')")).fetchall()
             for run_id, key, sj in rows:
                 state = json.loads(sj)
                 want = sorted((p["strategy"], p["symbol"], round(p["qty"], 12), round(p["stop"], 10))
@@ -380,6 +504,10 @@ class Runtime:
 
         tradable = [s for s in self.md.symbols() if s not in problems]
         try:
+            self.prepare_ai_reviews(d, frames, tradable)  # network calls happen HERE, never inside the tx
+        except _Stopping:
+            return self._defer(d, "trader stopping while fetching AI reviews")
+        try:
             accounts_out = {}
             with self.db.tx() as c:
                 runs = self._ensure_runs(c, d)
@@ -392,16 +520,15 @@ class Runtime:
                          "m": f"{sym} not traded on {d}: {why}. No position is held in it."})
                     queue_alert(c, "urgent", f"[trader] data problem: {sym}", f"{sym} excluded from trading on {d}: {why}",
                                 f"data:{d}:{sym}")
-                for key, strategies in self.accounts():
+                for acct in self.accounts():
+                    key = acct.key
                     run_id, start = runs[key]
                     row = c.execute(text("SELECT state_json FROM run_state WHERE run_id = :r"), {"r": run_id}).fetchone()
                     state = json.loads(row[0]) if row else None
                     if state and state["last_date"] and state["last_date"] >= d:
                         continue  # defensive: this account already has day d
-                    engine_frames = {s: df.loc[:d] for s, df in frames.items() if s in tradable}
-                    eng, *_ = make_engine(self.cfg, engine_frames, strategies, symbols=tradable, start=start)
-                    if state:
-                        eng.load_state(state)
+                    advisor = self._review_book(acct, d, self._stored_reviews(c, key, d)) if acct.ai else None
+                    eng = self._engine(acct, frames, tradable, d, start, state, advisor)
                     j = eng.run(until=d)
                     if eng.last_date != d:
                         raise RuntimeError(f"{key}: engine did not process {d} (last {eng.last_date})")

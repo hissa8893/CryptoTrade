@@ -21,7 +21,7 @@ def _reqs(name):
     return [Requirement(l) for l in lines if l and not l.startswith("#")]
 
 
-@pytest.mark.parametrize("name", ["requirements.txt", "requirements-dev.txt"])
+@pytest.mark.parametrize("name", ["requirements.txt", "requirements-dev.txt", "requirements-llm.txt"])
 def test_every_line_is_valid_and_exactly_pinned(name):
     for r in _reqs(name):
         specs = list(r.specifier)
@@ -41,3 +41,11 @@ def test_one_version_per_package_per_platform(platform, py):
     assert "ccxt" in seen and "cryptography" in seen
     expected = "==48.0.1" if platform == "mac-intel" else "==50.0.1"
     assert seen["cryptography"] == expected
+
+
+def test_optional_ai_packages_never_conflict_with_the_main_pins():
+    main = {r.name.lower().replace("_", "-"): str(r.specifier) for r in _reqs("requirements.txt")}
+    for r in _reqs("requirements-llm.txt"):
+        key = r.name.lower().replace("_", "-")
+        assert key not in main, f"{key} is pinned in both files"
+    assert any(r.name == "anthropic" for r in _reqs("requirements-llm.txt"))

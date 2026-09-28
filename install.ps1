@@ -31,6 +31,11 @@ Step "Installing pinned dependencies (requirements.txt)"
 & $vpy -m pip install --quiet -r requirements.txt
 if ($LASTEXITCODE -ne 0) { Write-Host "dependency install failed (see errors above)"; exit 1 }
 & $vpy -m pip install --quiet --no-deps -e .
+if (Test-Path "requirements-llm.txt") {
+  Step "Installing the optional AI analyst packages (requirements-llm.txt)"
+  & $vpy -m pip install --quiet -r requirements-llm.txt
+  if ($LASTEXITCODE -ne 0) { Write-Host "optional AI packages did not install; the trader works without them" }
+}
 
 Step "Creating data\, logs\, run\, reports\ and config files"
 & $vpy -m trader init

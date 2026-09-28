@@ -77,6 +77,11 @@ step "Installing pinned dependencies (requirements.txt)"
 "$VPY" -m pip install --upgrade --quiet pip || die "pip upgrade failed"
 "$VPY" -m pip install --quiet -r requirements.txt || die "dependency install failed (see errors above)"
 "$VPY" -m pip install --quiet --no-deps -e . || say "⚠️  editable install failed; use '.venv/bin/python -m trader' instead of 'trader'"
+if [ -f requirements-llm.txt ]; then
+  step "Installing the optional AI analyst packages (requirements-llm.txt)"
+  "$VPY" -m pip install --quiet -r requirements-llm.txt \
+    || say "⚠️  optional AI packages did not install; the trader works without them (AI reviews then follow the rules)"
+fi
 
 # ---------------------------------------------------------------- 3. dirs, config, DB
 step "Creating data/, logs/, run/, reports/ and config files"

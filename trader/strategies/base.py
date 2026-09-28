@@ -31,6 +31,7 @@ class SymbolData:
     filled: np.ndarray  # True = synthetic flat gap-fill bar (never traded on)
     ind: dict[str, np.ndarray] = field(default_factory=dict)  # strategy indicators
     index: dict[str, int] = field(default_factory=dict)  # date -> row
+    volume: np.ndarray | None = None  # only used as context for the optional AI analyst
 
     @classmethod
     def from_frame(cls, symbol: str, df: pd.DataFrame) -> "SymbolData":
@@ -45,6 +46,7 @@ class SymbolData:
             close=df["close"].to_numpy(dtype="float64"),
             filled=filled,
             index={d: i for i, d in enumerate(dates)},
+            volume=df["volume"].to_numpy(dtype="float64") if "volume" in df else None,
         )
 
 

@@ -22,6 +22,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from trader.ai_report import ai_summary
 from trader.charts import line_chart
 from trader.dashboard import NEAR_STOP, RANGES, Dashboard
 from trader.paths import PACKAGE_DIR
@@ -144,7 +145,7 @@ def register_dashboard(app: FastAPI, dash: Dashboard) -> None:
         eqs = dash.equity_series(acct, rng) if acct else None
         chart = ddchart = None
         if eqs:
-            series = [{"name": f"{acct['label']}", "short": acct["name"].title() if acct["name"] == "PORTFOLIO" else acct["name"],
+            series = [{"name": f"{acct['label']}", "short": acct["short"],
                        "color": "var(--pos)", "values": eqs["equity"]}]
             dds = [{"name": "Drawdown", "short": "Drawdown", "color": "var(--neg)", "values": eqs["dd"], "fill": True}]
             if "bh" in eqs:
@@ -161,6 +162,7 @@ def register_dashboard(app: FastAPI, dash: Dashboard) -> None:
             "trades": dash.trades(acct), "events": dash.events(acct), "board": dash.scoreboard(),
             "alerts": dash.alerts_summary(), "max_positions": cfg.risk.max_positions,
             "heat_limit": cfg.risk.max_portfolio_heat, "near_stop": NEAR_STOP,
+            "ai": ai_summary(dash.db, dash.md.source), "llm_on": cfg.llm.enabled,
         }
 
     @app.get("/", response_class=HTMLResponse)
